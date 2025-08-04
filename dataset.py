@@ -1,10 +1,11 @@
-# dataset.py
+# PIIClassifier/dataset.py
 
 from torch.utils.data import Dataset
 import torch
 import json
 import os
 
+# Label mapping
 label_2_id = {"일반" : 0, "개인" : 1, "기밀" : 2, "준식별" : 3}
 id_2_label = {0 : "일반", 1 : "개인", 2 : "기밀", 3 : "준식별"}
 

@@ -1,38 +1,36 @@
-# model.py
+# PIIClassifier/model.py
 
 import torch.nn as nn
 import torch
 
 class SpanPIIClassifier(nn.Module):
-    def __init__(self, pretrained_bert, hidden_size=768):
+    def __init__(self, pretrained_bert, num_labels=4):
         super().__init__()
         self.pretrained_bert = pretrained_bert
+        self.hidden_size = pretrained_bert.config.hidden_size
+
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_size*2, hidden_size),
+            nn.Linear(self.hidden_size*2, self.hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, 1) # binary classification -> 4개로 수정요망
+            nn.Linear(self.hidden_size, num_labels)
         )
 
-    def forward(self, input_ids, attention_mask, span_indices_batch):
+    def forward(self, input_ids, attention_mask, token_start, token_end):
         outputs = self.pretrained_bert(
-            input_ids=input_ids, # "input_ids" shape: (batch_size, token_len)
-            attention_mask=attention_mask
-        ) # "BERT output" shape: (batch_size, seq_len, hidden_size)
+            input_ids=input_ids, # shape: (batch_size, token_len)
+            attention_mask=attention_mask # shape: (batch_size, token_len)
+            )        
         last_hidden = outputs.last_hidden_state # shape: (batch_size, token_len, hidden_size), embeddings of each token
-        ##### skt/kobert-base-v1에는 없는 매서드일수도
 
-        batch_span_logits = []
+        # Batch wise 인덱싱
+        batch_size = input_ids.size(0)
+        start_embeds = last_hidden[torch.arange(batch_size), token_start] # shape: (batch_size, hidden_size)
+        end_embeds = last_hidden[torch.arange(batch_size), token_end] # shape: (batch_size, hidden_size)
 
-        for batch in range( len(span_indices_batch) ):
-            span_indices = span_indices_batch[ batch ]
-            span_reps = []
-            for (start, end) in span_indices:
-                hidden_start = last_hidden[batch, start]
-                hidden_end = last_hidden[batch, end]
-                span_rep = torch.cat([hidden_start, hidden_end])
-                span_reps.append( span_rep )
-            span_reps = torch.stack( span_reps ) # shape: (num_spans, hidden_size*2)
-            logits = self.classifier( span_reps ).squeeze(-1) # shape: (num_spans, )
-            batch_span_logits.append( logits )
+        # Concat start+end hidden
+        span_representation = torch.cat([start_embeds, end_embeds], dim=-1) # shape: (batch_size, hidden_size*2)
 
-        return batch_span_logits 
+        # Classification
+        logits = self.classifier(span_representation)
+
+        return {"logits": logits} 

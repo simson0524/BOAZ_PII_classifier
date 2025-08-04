@@ -1,42 +1,42 @@
-# train.py
+# PIIClassifier/train.py
 
-### TODO : 데이터셋(JSON)에 알맞게 dataloader 설계
-### TODO : Distributed Data Parallel을 사용한 병렬학습 구현
+### TODO : 워매 내가 transformers에 맞게 해부렀넹;;
 
-from transformers import AutoModel, AutoTokenizer
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import precision_score, recall_score, f1_score
 from tqdm.auto import tqdm
+from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.model_selection import train_test_split
+from transformers import BertModel
+from kobert_tokenizer import KoBERTTokenizer
 from torch.utils.data import DataLoader
-from dataset import PIISpanDataset, collate_fn
 from model import SpanPIIClassifier
-import torch.nn.functional as F
+from dataset import SpanClassificationDataset, load_all_json
 import torch
 import json
 import os
+
+# Label mapping
+label_2_id = {"일반" : 0, "개인" : 1, "기밀" : 2, "준식별" : 3}
+id_2_label = {0 : "일반", 1 : "개인", 2 : "기밀", 3 : "준식별"}
 
 # Train Loop
 def train_loop(model, dataloader, optimizer, device):
     model.train()
     total_loss = 0
+    loss_fn = torch.nn.CrossEntropyLoss()
 
     for batch in tqdm(dataloader, total=len(dataloader), desc="train"):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
-        span_indices = batch["span_indices"]
-        span_labels = batch["span_labels"]
+        token_start = batch["token_start"].to(device)
+        token_end = batch["token_end"].to(device)
+        labels = batch["labels"].to(device)
 
-        logits = model(input_ids=input_ids,
-                       attention_mask=attention_mask,
-                       span_indices_batch=span_indices)
+        outputs = model(input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        token_start=token_start,
+                        token_end=token_end)
         
-        loss = 0
-
-        for pred, label in zip(logits, span_labels):
-            label = label.to(device)
-            loss += F.binary_cross_entropy_with_logits(pred, label)
-        
-        loss /= len(logits)
+        loss = loss_fn(outputs["logits"], labels)
 
         optimizer.zero_grad()
         loss.backward()
@@ -49,55 +49,72 @@ def train_loop(model, dataloader, optimizer, device):
 def evaluate(model, dataloader, device):
     model.eval()
     total_loss = 0
-    total_preds = []
-    total_labels = []
+    loss_fn = torch.nn.CrossEntropyLoss()
+
+    preds, targets = [], []
 
     with torch.no_grad():
         for batch in tqdm(dataloader, total=len(dataloader), desc='evaluation'):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            span_indices = batch['span_indices']
-            span_labels = batch['span_labels']
+            token_start = batch["token_start"].to(device)
+            token_end = batch["token_end"].to(device)
+            labels = batch["labels"].to(device)
 
-            logits = model(input_ids=input_ids,
-                           attention_mask=attention_mask,
-                           span_indices_batch=span_indices)
+            outputs = model(input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            token_start=token_start,
+                            token_end=token_end)
             
-            for pred, label in zip(logits, span_labels):
-                label = label.to(device)
-                loss = F.binary_cross_entropy_with_logits(pred, label)
-                total_loss += loss.item()
+            loss = loss_fn(outputs["logits"], labels)
+            total_loss += loss.item()
 
-                probs = torch.sigmoid(pred)
-                total_preds.extend((probs > 0.5).int().cpu().tolist())
-                total_labels.extend(label.cpu().tolist())
+            pred_labels = torch.argmax(outputs['logits'], dim=-1)
+            preds.extend(pred_labels.cpu().tolist())
+            targets.extend(labels.cpu().tolist())
 
     avg_loss = total_loss / len(dataloader)
-    precision = precision_score(total_labels, total_preds, zero_division=0)
-    recall = recall_score(total_labels, total_preds, zero_division=0)
-    f1 = f1_score(total_labels, total_preds, zero_division=0)
+    precision = precision_score(targets, preds, average="macro", zero_division=0)
+    recall = recall_score(targets, preds, average="macro", zero_division=0)
+    f1 = f1_score(targets, preds, average="macro", zero_division=0)
 
     return avg_loss, precision, recall, f1
 
+# 여기부터는 수정요망
 if __name__ == "__main__":
     # Load SKT/KoBERT model and tokenizer
     model_name = "skt/kobert-base-v1"
-    model = AutoModel.from_pretrained( model_name )
-    tokenizer = AutoTokenizer.from_pretrained( model_name )
+    model = BertModel.from_pretrained( model_name )
+    tokenizer = BertTokenizer.from_pretrained( model_name )
 
     # Set train config
     batch_size = 16
     num_epochs = 30
     learning_rate = 1e-5
+    max_length = 512
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load data & dataloader
-    # TODO #
-    train_loader = "TODO"
-    valid_loader = "TODO"
+    # Load data
+    json_data_dir = "../Data/samples"
+    all_json_data = load_all_json(json_data_dir)
+
+    # Split data into train and valid
+    train_json, valid_json = {}, {}
+    train_json["data"], valid_json["data"], train_json["annotations"], valid_json["annotations"] = train_test_split(all_json_data["data"],
+                                                                                                                    all_json_data["annotations"],
+                                                                                                                    test_size=0.2,
+                                                                                                                    random_state=42)
+    # Dataset
+    train_dataset = SpanClassificationDataset(train_json, tokenizer, label_2_id, max_length)
+    valid_dataset = SpanClassificationDataset(valid_json, tokenizer, label_2_id, max_length)
+
+    # Dataloader
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
 
     # Model
-    model = SpanPIIClassifier(model).to( device )
+    model = SpanPIIClassifier(model, 
+                              num_labels=len(label_2_id)).to( device )
 
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(),
@@ -116,7 +133,7 @@ if __name__ == "__main__":
         # Save best model
         if val_f1 > best_f1:
             best_f1 = val_f1
-            os.makedirs("best_models", exist_ok=True)
-            model_path = os.path.join("best_models", f"000000_000_best_model_{epoch}.pt")
+            os.makedirs("../Checkpoints", exist_ok=True)
+            model_path = os.path.join("../Checkpoints", f"000000_000_best_model_{epoch}.pt")
             torch.save(model.state_dict(), model_path)
             print(f"✅ Best model saved! @[{model_path}]")
