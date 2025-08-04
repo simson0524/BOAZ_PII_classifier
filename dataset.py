@@ -8,8 +8,8 @@ import os
 label_2_id = {"일반" : 0, "개인" : 1, "기밀" : 2, "준식별" : 3}
 id_2_label = {0 : "일반", 1 : "개인", 2 : "기밀", 3 : "준식별"}
 
-class PIISpanDataset(Dataset): # 수정 요망
-    def __init__(self, json_data, tokenizer, max_length=512):
+class SpanClassificationDataset(Dataset):
+    def __init__(self, json_data, tokenizer, label_2_id=label_2_id, max_length=512):
         self.samples = {data['id']: data for data in json_data["data"]}
         self.annotations = {ann['id']: ann['annotations'] for ann in json_data['annotations']}
         self.tokenizer = tokenizer
