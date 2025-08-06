@@ -1,18 +1,16 @@
 # PIIClassifier/train.py
 
-### TODO : 워매 내가 transformers에 맞게 해부렀넹;;
-
 from tqdm.auto import tqdm
 from sklearn.metrics import precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
-from transformers import BertModel
-from kobert_tokenizer import KoBERTTokenizer
+from transformers import BertModel, BertTokenizerFast, AutoConfig
 from torch.utils.data import DataLoader
 from model import SpanPIIClassifier
 from dataset import SpanClassificationDataset, load_all_json
 import torch
 import json
 import os
+
 
 # Label mapping
 label_2_id = {"일반" : 0, "개인" : 1, "기밀" : 2, "준식별" : 3}
@@ -83,9 +81,11 @@ def evaluate(model, dataloader, device):
 # 여기부터는 수정요망
 if __name__ == "__main__":
     # Load SKT/KoBERT model and tokenizer
-    model_name = "skt/kobert-base-v1"
+    model_name = "monologg/kobert"
     model = BertModel.from_pretrained( model_name )
-    tokenizer = BertTokenizer.from_pretrained( model_name )
+    tokenizer = BertTokenizerFast.from_pretrained( model_name, return_offsets_mapping=True )
+
+    print(f"=====[ MODEL CONFIG INFO ]=====\n{AutoConfig.from_pretrained( model_name )}\n\n")
 
     # Set train config
     batch_size = 16

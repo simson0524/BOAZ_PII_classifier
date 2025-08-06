@@ -20,6 +20,7 @@ class SpanClassificationDataset(Dataset):
         self._create_instances()
 
     def _create_instances(self):
+        truncated_sent = 0
         for sent_id, anns in self.annotations.items():
             sent = self.samples[sent_id]["sentence"]
             encoding = self.tokenizer(
@@ -48,7 +49,8 @@ class SpanClassificationDataset(Dataset):
                 
                 # span이 잘린 경우 건너뛰기
                 if token_start is None or token_end is None:
-                    print(f"Current Span is truncated. Invalid Data")
+                    truncated_sent += 1
+                    print(f"Current Span is truncated. Invalid Data {truncated_sent}")
                     continue
 
                 self.instances.append({"input_ids": encoding["input_ids"],
@@ -89,7 +91,7 @@ def load_all_json(json_dir="../Data"):
         if file_name.endswith(".json"):
             with open(os.path.join(json_dir, file_name), "r", encoding='utf-8') as f:
                 json_file = json.load(f)
-                all_data["data"].extend( json_file["data"] )
+                all_data["data"].append( json_file["data"] )
                 all_data["annotations"].extend( json_file["annotations"] )
     
     return all_data
