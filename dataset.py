@@ -1,26 +1,30 @@
 # PIIClassifier/dataset.py
 
 from torch.utils.data import Dataset
+from konlpy.tag import Okt
+from collections import defaultdict
+import pandas as pd
 import torch
 import json
 import os
 
-# Label mapping
-label_2_id = {"일반" : 0, "개인" : 1, "기밀" : 2, "준식별" : 3}
-id_2_label = {0 : "일반", 1 : "개인", 2 : "기밀", 3 : "준식별"}
 
 class SpanClassificationDataset(Dataset):
-    def __init__(self, json_data, tokenizer, label_2_id=label_2_id, max_length=512):
+    def __init__(self, json_data, tokenizer, label_2_id, max_length=512):
         self.samples = {data['id']: data for data in json_data["data"]}
         self.annotations = {ann['id']: ann['annotations'] for ann in json_data['annotations']}
         self.tokenizer = tokenizer
         self.label_2_id = label_2_id
         self.max_length = max_length
         self.instances = []
+        self.okt = Okt()
         self._create_instances()
 
+
     def _create_instances(self):
-        truncated_sent = 0
+        span_truncated_sent = 0
+        positive_samples = 0
+        negative_samples = 0
         for sent_id, anns in self.annotations.items():
             sent = self.samples[sent_id]["sentence"]
             encoding = self.tokenizer(
@@ -30,36 +34,105 @@ class SpanClassificationDataset(Dataset):
                 return_offsets_mapping=True,
                 padding="max_length"
             )
-            offset_mapping = encoding.pop("offset_mapping")
+            input_ids = encoding['input_ids']
+            attention_mask = encoding['attention_mask']
+            offset_mapping = encoding["offset_mapping"]
 
+            used_token_spans = set()
+
+            # 1. annotation 라벨 처리 (char index → token index 변환이 필요[협의를 통해 결정완료])
             for ann in anns:
-                start, end, label = ann['start'], ann['end'], ann['label']
+                start_char, end_char, label = ann['start'], ann['end'], ann['label']
+                
                 if label not in self.label_2_id:
                     print(f"[{label}] label is not available")
                     continue
-                label_id = self.label_2_id[label]
 
-                # span을 토큰 인덱스로 mapping
+                # char index → token index 변환
                 token_start, token_end = None, None
-                for idx, (s, e) in enumerate(offset_mapping):
-                    if s == start:
-                        token_start = idx
-                    if e == end:
-                        token_end = idx
-                
-                # span이 잘린 경우 건너뛰기
+                for i, (start, end) in enumerate(offset_mapping):
+                    if start <= start_char < end:
+                        token_start = i
+                    if start < end_char <= end:
+                        token_end = i + 1
                 if token_start is None or token_end is None:
-                    truncated_sent += 1
-                    print(f"Current Span is truncated. Invalid Data {truncated_sent}")
+                    span_truncated_sent += 1
+                    print(f"[NOTICE] Current Sentence is skipped due to span truncation\n{sent}\n\n")
                     continue
 
-                self.instances.append({"input_ids": encoding["input_ids"],
-                                       "attention_mask": encoding["attention_mask"],
-                                       "token_start": token_start,
-                                       "token_end": token_end,
-                                       "label": label_id,
-                                       "sentence": sent,
-                                       "span_text": sent[start:end]})
+                label_id = self.label_2_id[label]
+                used_token_spans.add((token_start, token_end))
+
+                self.instances.append({
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "token_start": token_start,
+                    "token_end": token_end,
+                    "label": label_id,
+                    "sentence": sent,
+                    "span_text": self.tokenizer.convert_tokens_to_string(
+                        self.tokenizer.convert_ids_to_tokens(input_ids[token_start:token_end])
+                    )
+                })
+
+                positive_samples += 1
+
+            # 2. 명사 → 일반 라벨링 (char index 기반 → token index 변환 필요)
+            nouns = self.okt.nouns(sent)
+            for noun in nouns:
+                if noun.strip() == "":
+                    continue
+
+                # 동일 명사 반복 시 중복 제거용
+                for start_idx in [i for i in range(len(sent)) if sent.startswith(noun, i)]:
+                    end_idx = start_idx + len(noun)
+                    if end_idx > len(sent):
+                        continue
+
+                    token_start, token_end = None, None
+                    for i, (s, e) in enumerate(offset_mapping):
+                        if s == e:
+                            continue # [CLS], [SEP], [PAD]은 offset_mapping -> (0,0)
+                        if s <= start_idx < e:
+                            token_start = i
+                        if s < end_idx <= e:
+                            token_end = i + 1
+                    if token_start is None or token_end is None:
+                        continue
+
+                    if (token_start, token_end) in used_token_spans:
+                        continue
+
+                    label_id = self.label_2_id.get("일반", None)
+                    if label_id is None:
+                        continue
+                    
+                    # # 로그용
+                    # if noun != sent[start_char:end_char]:
+                    #     print(f"[NOTICE] span candidate result is not matched with slicing\nCandidate : {noun}\nResult : {sent[start_char:end_char]}")
+                    #     continue
+
+                    self.instances.append({
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
+                        "token_start": token_start,
+                        "token_end": token_end,
+                        "label": label_id,
+                        "sentence": sent,
+                        "span_text": self.tokenizer.convert_tokens_to_string(
+                            self.tokenizer.convert_ids_to_tokens(input_ids[token_start:token_end])
+                        )
+                    })
+                    used_token_spans.add((token_start, token_end))
+
+                    negative_samples += 1
+        
+        print(f"[Total instances]\nPositive : {positive_samples}\nNegative : {negative_samples}")
+
+        instance_df = pd.DataFrame(self.instances)
+
+        instance_df.to_csv('samples.csv', index=False)
+
 
     def __getitem__(self, idx):
         item = self.instances[idx]
