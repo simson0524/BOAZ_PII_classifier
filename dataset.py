@@ -4,18 +4,20 @@ from torch.utils.data import Dataset
 from konlpy.tag import Okt
 from collections import defaultdict
 import pandas as pd
+import random
 import torch
 import json
 import os
 
 
 class SpanClassificationDataset(Dataset):
-    def __init__(self, json_data, tokenizer, label_2_id, max_length=512):
+    def __init__(self, train_name, json_data, tokenizer, label_2_id, max_length=256):
         self.samples = {data['id']: data for data in json_data["data"]}
         self.annotations = {ann['id']: ann['annotations'] for ann in json_data['annotations']}
         self.tokenizer = tokenizer
         self.label_2_id = label_2_id
         self.max_length = max_length
+        self.train_name = train_name
         self.instances = []
         self.okt = Okt()
         self._create_instances()
@@ -40,6 +42,9 @@ class SpanClassificationDataset(Dataset):
 
             used_token_spans = set()
 
+            # 향후 일반 라벨이랑 밸런스를 맞춰주기 위함(random_selected_normal_instances에서 사용)
+            num_anns = len(anns)
+
             # 1. annotation 라벨 처리 (char index → token index 변환이 필요[협의를 통해 결정완료])
             for ann in anns:
                 start_char, end_char, label = ann['start'], ann['end'], ann['label']
@@ -57,7 +62,7 @@ class SpanClassificationDataset(Dataset):
                         token_end = i + 1
                 if token_start is None or token_end is None:
                     span_truncated_sent += 1
-                    print(f"[NOTICE] Current Sentence is skipped due to span truncation\n{sent}\n\n")
+                    # print(f"[NOTICE] Current Sentence is skipped due to span truncation\n{sent}\n\n")
                     continue
 
                 label_id = self.label_2_id[label]
@@ -78,6 +83,8 @@ class SpanClassificationDataset(Dataset):
                 positive_samples += 1
 
             # 2. 명사 → 일반 라벨링 (char index 기반 → token index 변환 필요)
+            normal_instances = []
+
             nouns = self.okt.nouns(sent)
             for noun in nouns:
                 if noun.strip() == "":
@@ -105,34 +112,39 @@ class SpanClassificationDataset(Dataset):
 
                     label_id = self.label_2_id.get("일반", None)
                     if label_id is None:
-                        continue
-                    
-                    # # 로그용
-                    # if noun != sent[start_char:end_char]:
-                    #     print(f"[NOTICE] span candidate result is not matched with slicing\nCandidate : {noun}\nResult : {sent[start_char:end_char]}")
-                    #     continue
+                        continue 
 
-                    self.instances.append({
+                    span_text = self.tokenizer.convert_tokens_to_string(
+                            self.tokenizer.convert_ids_to_tokens(input_ids[token_start:token_end])
+                        )
+
+                    if len(span_text) == 1:
+                        continue
+
+                    normal_instances.append({
                         "input_ids": input_ids,
                         "attention_mask": attention_mask,
                         "token_start": token_start,
                         "token_end": token_end,
                         "label": label_id,
                         "sentence": sent,
-                        "span_text": self.tokenizer.convert_tokens_to_string(
-                            self.tokenizer.convert_ids_to_tokens(input_ids[token_start:token_end])
-                        )
+                        "span_text": span_text
                     })
                     used_token_spans.add((token_start, token_end))
 
-                    negative_samples += 1
+            # label balance를 위한 조치
+            num_random_samples = min(num_anns, len(normal_instances))
+            random_selected_normal_instances = random.sample(normal_instances, num_random_samples)
+            self.instances.extend( random_selected_normal_instances )
+
+            negative_samples += len( random_selected_normal_instances )
         
         print(f"[Total instances]\nPositive : {positive_samples}\nNegative : {negative_samples}")
 
         instance_df = pd.DataFrame(self.instances)
 
-        instance_df.to_csv('samples.csv', index=False)
-
+        instance_df.to_csv(f'../DatasetInstanceSamples/{self.train_name}_dataset_samples.csv', index=False)
+        
 
     def __getitem__(self, idx):
         item = self.instances[idx]

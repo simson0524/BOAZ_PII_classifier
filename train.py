@@ -87,8 +87,8 @@ if __name__ == "__main__":
 
     # Set train config
     tqdm_disable = False
-    train_name = "250811_03"
-    batch_size = 128
+    train_name = "250812_03"
+    batch_size = 64
     num_epochs = 30
     learning_rate = 1e-5
     max_length = 256
@@ -106,8 +106,8 @@ if __name__ == "__main__":
                                                                                                                     test_size=0.2,
                                                                                                                     random_state=42)
     # Dataset
-    train_dataset = SpanClassificationDataset(train_json, tokenizer, label_2_id, max_length)
-    valid_dataset = SpanClassificationDataset(valid_json, tokenizer, label_2_id, max_length)
+    train_dataset = SpanClassificationDataset(train_name, train_json, tokenizer, label_2_id, max_length)
+    valid_dataset = SpanClassificationDataset(train_name, valid_json, tokenizer, label_2_id, max_length)
 
     # Dataloader
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
