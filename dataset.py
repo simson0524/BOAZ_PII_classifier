@@ -47,8 +47,9 @@ class SpanClassificationDataset(Dataset):
 
             # 1. annotation 라벨 처리 (char index → token index 변환이 필요[협의를 통해 결정완료])
             for ann in anns:
-                start_char, end_char, label = ann['start'], ann['end'], ann['label']
-                
+                start_char, end_char, label, score = ann['start'], ann['end'], ann['label'], ann['score']
+                score = float(score)
+
                 if label not in self.label_2_id:
                     print(f"[{label}] label is not available")
                     continue
@@ -77,7 +78,8 @@ class SpanClassificationDataset(Dataset):
                     "sentence": sent,
                     "span_text": self.tokenizer.convert_tokens_to_string(
                         self.tokenizer.convert_ids_to_tokens(input_ids[token_start:token_end])
-                    )
+                    ),
+                    "span_conf_score": score
                 })
 
                 positive_samples += 1
@@ -128,7 +130,8 @@ class SpanClassificationDataset(Dataset):
                         "token_end": token_end,
                         "label": label_id,
                         "sentence": sent,
-                        "span_text": span_text
+                        "span_text": span_text,
+                        "span_conf_score": 1
                     })
                     used_token_spans.add((token_start, token_end))
 
@@ -154,6 +157,7 @@ class SpanClassificationDataset(Dataset):
             "token_start": torch.tensor(item["token_start"]),
             "token_end": torch.tensor(item["token_end"]),
             "labels": torch.tensor(item["label"]),
+            "span_conf_score": torch.tensor(item["span_conf_score"])
         }
     
     def __len__(self):

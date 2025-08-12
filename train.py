@@ -15,11 +15,25 @@ import os
 label_2_id = {"일반" : 0, "개인" : 1}
 id_2_label = {0 : "일반", 1 : "개인"}
 
+# 커스텀 CELoss
+def soft_cross_entropy_with_confidence(logits, target_indices, conf_scores):
+    num_classes = logits.size(1)
+    
+    # 커스텀 원 핫 라벨 * conf_scores
+    target_one_hot = torch.nn.functional.one_hot(target_indices, num_classes=num_classes).float()
+    target_soft = target_one_hot * conf_scores.unsqueeze(1)
+
+    # CE 계산
+    log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+    loss = -(target_soft * log_probs).sum(dim=1)
+
+    return loss.mean()
+
 # Train Loop
 def train_loop(model, dataloader, optimizer, device, tqdm_disable=False):
     model.train()
     total_loss = 0
-    loss_fn = torch.nn.CrossEntropyLoss()
+    # loss_fn = torch.nn.CrossEntropyLoss()
 
     for batch in tqdm(dataloader, total=len(dataloader), desc="train", disable=tqdm_disable):
         input_ids = batch["input_ids"].to(device)
@@ -27,13 +41,15 @@ def train_loop(model, dataloader, optimizer, device, tqdm_disable=False):
         token_start = batch["token_start"].to(device)
         token_end = batch["token_end"].to(device)
         labels = batch["labels"].to(device)
+        scores = batch["span_conf_score"].to(device)
 
         outputs = model(input_ids=input_ids,
                         attention_mask=attention_mask,
                         token_start=token_start,
                         token_end=token_end)
         
-        loss = loss_fn(outputs["logits"], labels) # Logits : [0.87, 0.13] -> [1, 0]  /  GT : [1, 0]
+        # loss = loss_fn(outputs["logits"], labels) # Logits : [0.87, 0.13] -> [1, 0]  /  GT : [1, 0]
+        loss = soft_cross_entropy_with_confidence(outputs["logits"], labels, scores)
 
         optimizer.zero_grad()
         loss.backward()
@@ -87,12 +103,12 @@ if __name__ == "__main__":
 
     # Set train config
     tqdm_disable = False
-    train_name = "250812_03"
+    train_name = "250812_04"
     batch_size = 64
     num_epochs = 30
     learning_rate = 1e-5
     max_length = 256
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"=====[ Train CONFIG INFO ]====\nBatch_size : {batch_size}\nNum_epochs : {num_epochs}\nLearning_rate : {learning_rate}\nMax_length : {max_length}\nDevice : {device}\n\n")
 
     # Load data
