@@ -152,6 +152,7 @@ class SpanClassificationDataset(Dataset):
     def __getitem__(self, idx):
         item = self.instances[idx]
         return {
+            "idx": torch.tensor(idx),
             "input_ids": torch.tensor(item["input_ids"]),
             "attention_mask": torch.tensor(item["attention_mask"]),
             "token_start": torch.tensor(item["token_start"]),

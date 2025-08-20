@@ -7,6 +7,7 @@ from transformers import AutoModel, AutoTokenizer, AutoConfig
 from torch.utils.data import DataLoader
 from model import SpanPIIClassifier
 from dataset import SpanClassificationDataset, load_all_json
+import pandas as pd
 import torch
 import json
 import os
@@ -48,7 +49,7 @@ def train_loop(model, dataloader, optimizer, device, tqdm_disable=False):
                         token_start=token_start,
                         token_end=token_end)
         
-        # loss = loss_fn(outputs["logits"], labels) # Logits : [0.87, 0.13] -> [1, 0]  /  GT : [1, 0]
+        # loss = loss_fn(outputs["logits"], labels) # Logits : [0.87, 0.13] -> [1, 0]  /  GT : [0, 1]
         loss = soft_cross_entropy_with_confidence(outputs["logits"], labels, scores)
 
         optimizer.zero_grad()
@@ -59,14 +60,17 @@ def train_loop(model, dataloader, optimizer, device, tqdm_disable=False):
     return total_loss / len(dataloader)
 
 # Evaluation
-def evaluate(model, dataloader, device, tqdm_disable=False):
+def evaluate(model, dataloader, device, tqdm_disable=False, is_best_model=False, tokenizer=None, train_name='test'):
     model.eval()
     total_loss = 0
     loss_fn = torch.nn.CrossEntropyLoss()
 
     preds, targets = [], []
 
-    with torch.no_grad():
+    # 불일치 샘플 목록
+    mismatches = []
+
+    with torch.no_grad():        
         for batch in tqdm(dataloader, total=len(dataloader), desc='evaluation', disable=tqdm_disable):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
@@ -86,10 +90,42 @@ def evaluate(model, dataloader, device, tqdm_disable=False):
             preds.extend(pred_labels.cpu().tolist())
             targets.extend(labels.cpu().tolist())
 
+            batch_size = labels.size(0)
+            if is_best_model:
+                for i in range(batch_size):
+                    pred = pred_labels[i].item()
+                    label = labels[i].item()
+                    if pred != label:
+                        mismatched_item = {
+                            'idx': int(batch['idx'][i].item()) if 'idx' in batch else None,
+                            'label': label,
+                            'pred': pred,
+                            'token_start': int(batch['token_start'][i].item()),
+                            'token_end': int(batch['token_end'][i].item()),
+                            'span_conf_score': float(batch['span_conf_score'][i].item())
+                        }
+
+                        # sent와 span_text 복원
+                        if tokenizer is not None:
+                            attn = batch['attention_mask'][i].bool().cpu()
+                            ids = batch['input_ids'][i].cpu()[attn].tolist()
+                            try:
+                                mismatched_item['text'] = tokenizer.decode(ids, skip_special_tokens=True)
+                                mismatched_item['span_text'] = tokenizer.decode(batch['input_ids'][i][mismatched_item['token_start']:mismatched_item['token_end']], skip_special_tokens=True)
+                            except Exception:
+                                mismatched_item['text'] = None
+                                mismatched_item['span_text'] = None
+                        
+                        mismatches.append( mismatched_item )
+                            
     avg_loss = total_loss / len(dataloader)
     precision = precision_score(targets, preds, average="macro", zero_division=0)
     recall = recall_score(targets, preds, average="macro", zero_division=0)
     f1 = f1_score(targets, preds, average="macro", zero_division=0)
+
+    if is_best_model:
+        result_df = pd.DataFrame(mismatches)
+        result_df.to_csv(f"../ValidationSamples/{train_name}_validation_samples.csv", index=False)
 
     return avg_loss, precision, recall, f1
 
@@ -103,7 +139,7 @@ if __name__ == "__main__":
 
     # Set train config
     tqdm_disable = False
-    train_name = "250812_04"
+    train_name = "250812_07"
     batch_size = 64
     num_epochs = 30
     learning_rate = 1e-5
@@ -112,7 +148,7 @@ if __name__ == "__main__":
     print(f"=====[ Train CONFIG INFO ]====\nBatch_size : {batch_size}\nNum_epochs : {num_epochs}\nLearning_rate : {learning_rate}\nMax_length : {max_length}\nDevice : {device}\n\n")
 
     # Load data
-    json_data_dir = "../Data/samples_60"
+    json_data_dir = "../Data/samples_90"
     all_json_data = load_all_json(json_data_dir)
 
     # Split data into train and valid
@@ -154,3 +190,5 @@ if __name__ == "__main__":
             model_path = os.path.join("../Checkpoints", f"{train_name}_best_model_{epoch}.pt")
             torch.save(model.state_dict(), model_path)
             print(f"✅ Best model saved! @[{model_path}]")
+            evaluate(model, valid_loader, device, tqdm_disable, is_best_model=True, tokenizer=tokenizer, train_name=train_name)
+            print(f"✅ Unmatched samples info saved!")
