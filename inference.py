@@ -16,7 +16,9 @@
    미탐 : 추출된 Span의 Inference 결과가 "일반"인데, 정답지에 "일반"이 아닌 상태로 존재하는 경우
 """
 
-def validation_1()
+def validation_1(dataloader, conn):
+    pass
+   
 
 # Test
 def test(model, dataloader, device, tqdm_disable=False):

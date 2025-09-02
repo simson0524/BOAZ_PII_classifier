@@ -6,51 +6,51 @@ from sklearn.model_selection import train_test_split
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 from torch.utils.data import DataLoader
 from model import SpanPIIClassifier
-from dataset import SpanClassificationDataset, load_all_json
+from train_dataset import SpanClassificationTrainDataset, load_all_json
+from test_dataset import SpanClassificationTestDataset, load_all_json
 import pandas as pd
 import torch
 import json
 import os
 
 # Label mapping
-label_2_id = {"일반" : 0, "개인" : 1}
-id_2_label = {0 : "일반", 1 : "개인"}
+pii_label_2_id = {"일반정보" : 0, "준식별자" : 1, "개인정보" : 2}
+secret_label_2_id = {"일반정보" : 0, "기밀정보" : 1}
 
-# 커스텀 CELoss
-def soft_cross_entropy_with_confidence(logits, target_indices, conf_scores):
-    num_classes = logits.size(1)
+# # 커스텀 CELoss
+# def soft_cross_entropy_with_confidence(logits, target_indices, conf_scores):
+#     num_classes = logits.size(1)
     
-    # 커스텀 원 핫 라벨 * conf_scores
-    target_one_hot = torch.nn.functional.one_hot(target_indices, num_classes=num_classes).float()
-    target_soft = target_one_hot * conf_scores.unsqueeze(1)
+#     # 커스텀 원 핫 라벨 * conf_scores
+#     target_one_hot = torch.nn.functional.one_hot(target_indices, num_classes=num_classes).float()
+#     target_soft = target_one_hot * conf_scores.unsqueeze(1)
 
-    # CE 계산
-    log_probs = torch.nn.functional.log_softmax(logits, dim=1)
-    loss = -(target_soft * log_probs).sum(dim=1)
+#     # CE 계산
+#     log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+#     loss = -(target_soft * log_probs).sum(dim=1)
 
-    return loss.mean()
+#     return loss.mean()
 
 # Train Loop
 def train_loop(model, dataloader, optimizer, device, tqdm_disable=False):
     model.train()
     total_loss = 0
-    # loss_fn = torch.nn.CrossEntropyLoss()
+    loss_fn = torch.nn.CrossEntropyLoss()
 
     for batch in tqdm(dataloader, total=len(dataloader), desc="train", disable=tqdm_disable):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         token_start = batch["token_start"].to(device)
         token_end = batch["token_end"].to(device)
-        labels = batch["labels"].to(device)
-        scores = batch["span_conf_score"].to(device)
+        labels = batch["label"].to(device)
 
         outputs = model(input_ids=input_ids,
                         attention_mask=attention_mask,
                         token_start=token_start,
                         token_end=token_end)
         
-        # loss = loss_fn(outputs["logits"], labels) # Logits : [0.87, 0.13] -> [1, 0]  /  GT : [0, 1]
-        loss = soft_cross_entropy_with_confidence(outputs["logits"], labels, scores)
+        loss = loss_fn(outputs["logits"], labels) # Logits : [0.87, 0.13] -> [1, 0]  /  GT : [0, 1]
+        # loss = soft_cross_entropy_with_confidence(outputs["logits"], labels, scores)
 
         optimizer.zero_grad()
         loss.backward()
@@ -76,7 +76,7 @@ def evaluate(model, dataloader, device, tqdm_disable=False, is_best_model=False,
             attention_mask = batch['attention_mask'].to(device)
             token_start = batch["token_start"].to(device)
             token_end = batch["token_end"].to(device)
-            labels = batch["labels"].to(device)
+            labels = batch["label"].to(device)
 
             outputs = model(input_ids=input_ids,
                             attention_mask=attention_mask,
@@ -102,7 +102,6 @@ def evaluate(model, dataloader, device, tqdm_disable=False, is_best_model=False,
                             'pred': pred,
                             'token_start': int(batch['token_start'][i].item()),
                             'token_end': int(batch['token_end'][i].item()),
-                            'span_conf_score': float(batch['span_conf_score'][i].item())
                         }
 
                         # sent와 span_text 복원
@@ -139,28 +138,40 @@ if __name__ == "__main__":
 
     # Set train config
     tqdm_disable = False
-    train_name = "250812_07"
+    train_name = "250902_02"
     batch_size = 64
     num_epochs = 30
     learning_rate = 1e-5
     max_length = 256
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"=====[ Train CONFIG INFO ]====\nBatch_size : {batch_size}\nNum_epochs : {num_epochs}\nLearning_rate : {learning_rate}\nMax_length : {max_length}\nDevice : {device}\n\n")
 
     # Load data
-    json_data_dir = "../Data/samples_90"
+    json_data_dir = "/home/student1/Data/01관리부"
     all_json_data = load_all_json(json_data_dir)
 
     # Split data into train and valid
     train_json, valid_json = {}, {}
-    train_json["data"], valid_json["data"], train_json["annotations"], valid_json["annotations"] = train_test_split(all_json_data["data"],
-                                                                                                                    all_json_data["annotations"],
-                                                                                                                    test_size=0.2,
-                                                                                                                    random_state=42)
+    train_json["data"], valid_json["data"] = train_test_split(all_json_data["data"],
+                                                             test_size=0.2,
+                                                             random_state=42)
     # Dataset
-    train_dataset = SpanClassificationDataset(train_name, train_json, tokenizer, label_2_id, max_length)
-    valid_dataset = SpanClassificationDataset(train_name, valid_json, tokenizer, label_2_id, max_length)
-
+    train_dataset = SpanClassificationTrainDataset(
+        train_name=train_name,
+        json_data=train_json, 
+        tokenizer=tokenizer, 
+        label_2_id=secret_label_2_id, 
+        is_pii=False, 
+        max_length=max_length
+        )
+    valid_dataset = SpanClassificationTrainDataset(
+        train_name=train_name,
+        json_data=valid_json, 
+        tokenizer=tokenizer, 
+        label_2_id=secret_label_2_id, 
+        is_pii=False, 
+        max_length=max_length
+        )
     # Dataloader
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
