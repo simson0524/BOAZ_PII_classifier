@@ -9,6 +9,7 @@ from collections import defaultdict
 from tqdm.auto import tqdm
 from DataPreprocessLogics.DBMS.db_sdk import get_connection, find_words_in_sentence_for_doc
 from DataPreprocessLogics.regex_based_doc_parsing.pii_detector.main import run_pii_detection
+from DataPreprocessLogics.ner_based_doc_parsing.ner_module import run_ner
 import pandas as pd
 import random
 import torch
@@ -35,15 +36,6 @@ class SpanClassificationTestDataset(Dataset):
     """
         
     def _create_instances(self):
-        # TODO : confusion matrix는 여기게 아니라 test코드로 보내주기
-        # mat[0][1] -> axis0 : ground truth | axis1 : pred
-        # 사전기반 axis0 : 정답지의 라벨 | axis1 : SPAN_TEXT가 포함된 각 사전의 라벨
-        valid_1_confusion_matrix = [[0 for _ in range( len(label_2_id) )] for _ in range( len(label_2_id) )]
-        # NER/REGEX기반 axis0 : 정답지의 라벨 | axis1 : 각 NER/REGEX가 포함된 라벨
-        valid_2_confusion_matrix = [[0 for _ in range( len(label_2_id) )] for _ in range( len(label_2_id) )]
-        # 일반적인 confusion matrix
-        valid_3_confusion_matrix = [[0 for _ in range( len(label_2_id) )] for _ in range( len(label_2_id) )]
-
         def find_char_idx_in_sentence(str_find_start_idx, sentence, span_text):
             char_start = sentence.find(span_text, str_find_start_idx)
 
@@ -249,21 +241,79 @@ class SpanClassificationTestDataset(Dataset):
                         "label": label_id,
                         "validation_priority": 2
                     })
-            # [NER]
-            #  NER이 지금 다른 것들과 "[입력] 문장 -> [출력] 타깃 단어들" 포맷이 안맞음
-            # TODO : 완철이 푸시사항 머지하고 구현
+
+            # 2-2. NER 추출 알고리즘
+            ner_texts = run_ner(sentence)
+            str_find_start_idx = 0
+            for span_text in ner_texts:
+                # 완철 : "NER로 뽑히는 모든것은 개인정보야!" 일동 : "ㅇㅋ"
+                label = "개인정보" 
+                
+                # sentence내 SPAN_TEXT의 char idx(start, end)를 추출
+                char_start, char_end, str_find_start_idx = find_char_idx_in_sentence(
+                    str_find_start_idx=str_find_start_idx,
+                    sentence=sentence,
+                    span_text=span_text
+                )
+
+                # 문장 내 SPAN_TEXT가 없으므로 진행불가(LOG as "no_span_skipped")
+                if char_start == None:
+                    no_span_skipped += 1
+                    continue
+
+                # char idx(start, end)를 token idx(start, end)로 변환
+                token_start, token_end = return_char_idx_to_token_idx(
+                    char_start=char_start,
+                    char_end=char_end,
+                    offset_mapping=offset_mapping
+                )
+
+                # "max_length truncation"으로 인해 해당 SPAN_TEXT가 잘린경우 진행불가(LOG as "span_truncated_sent_skipped")
+                if (token_start is None) or (token_end is None):
+                    span_truncated_sent_skipped += 1
+                    continue
+
+                # 만약 이전 프로세스 에서 해당 token이 이미 추출된 경우 건너띔
+                if is_extracted[token_start] == True and is_extracted[token_end-1] == True:
+                    continue
+
+                # 찾은 token idx(start, end)로 해당 SPAN_TEXT 토큰 정보 확인(token_id 및 decoded_token_id)
+                span_ids = input_ids[token_start:token_end]
+                decoded_span_ids = self.tokenizer.convert_ids_to_tokens(span_ids)
+
+                # 해당 SPAN_TEXT의 label
+                label_id = self.label_2_id[label]
+                samples_num[label_id] += 1
+
+                # 이후 프로세스에서 중복 추출 방지를 위한 token flag 설정
+                for token_idx in range(token_start, token_end):
+                    is_extracted[token_idx] = True
+
+                # 인스턴스 추가
+                self.instances.append({
+                        "sentence": sentence,
+                        "input_ids": input_ids,
+                        "decoded_input_ids": decoded_input_ids,
+                        "attention_mask": attention_mask,
+                        "span_text": span_text,
+                        "span_ids": span_ids,
+                        "decoded_span_ids": decoded_span_ids,
+                        "token_start": token_start,
+                        "token_end": token_end,
+                        "label": label_id,
+                        "validation_priority": 2
+                    })
             
 
-            # 검증 3 | Span추출 알고리즘
-            # 2. okt를 이용한 Span후보가 될 수 있는 POS tag 목록
-            # 1. 정답지에 있는 친구들 기준으로 우선 추출
+            ### 3. Span추출 알고리즘
+            # 3-1. 정답지에 있는 친구들 기준으로 우선 추출
             span_texts = find_words_in_sentence_for_doc(
                 conn=conn,
                 sentence=sentence,
                 table_name="정답지",
             )
 
-            # 1-1. 정답지에서 추출한 친구들을 인스턴스 추출
+            # 정답지에서 추출한 친구들을 인스턴스 추출
             str_find_start_idx = 0
             for span_text, label in span_texts:
                 if self.is_pii:
@@ -335,7 +385,7 @@ class SpanClassificationTestDataset(Dataset):
 
 
 
-            # 2. okt를 이용한 Span후보가 될 수 있는 POS tag 목록
+            # 3-2. okt를 이용한 Span후보가 될 수 있는 POS tag 목록
             target_pos = {"Noun", "Number", "Email", "URL", "Foreign", "Alpha"}
             POS_in_sentence = self.okt.pos( sentence )
 
@@ -426,6 +476,10 @@ class SpanClassificationTestDataset(Dataset):
         conn.close()
 
 
+    def edit_validation_priority(self, idx, edit_to):
+        self.instances[idx]["validation_priority"] = edit_to
+
+
     def __getitem__(self, idx):
         item = self.instances[idx]
         return {
@@ -440,6 +494,7 @@ class SpanClassificationTestDataset(Dataset):
             "label": torch.tensor(item["label"]),
             "validation_priority": item["validation_priority"]
         }
+
     
     def __len__(self):
         return len(self.instances)
