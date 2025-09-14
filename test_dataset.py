@@ -8,8 +8,8 @@ from konlpy.tag import Okt
 from collections import defaultdict
 from tqdm.auto import tqdm
 from DataPreprocessLogics.DBMS.db_sdk import get_connection, find_words_in_sentence_for_doc
-from DataPreprocessLogics.regex_based_doc_parsing.pii_detector.main import run_pii_detection
-from DataPreprocessLogics.ner_based_doc_parsing.ner_module import run_ner
+from DataPreprocessLogics.regex_based_doc_parsing.pii_detector.main import run_regex_detection
+from DataPreprocessLogics.ner_based_doc_parsing.ner_main import run_ner_detection
 import pandas as pd
 import random
 import torch
@@ -20,6 +20,7 @@ import os
 class SpanClassificationTestDataset(Dataset):
     def __init__(self, test_name, json_data, tokenizer, label_2_id, is_pii=True, max_length=256):
         self.samples = {data['id']: data for data in json_data["data"]}
+        self.annotations = {data[0]['id']: data[0]['annotations'] for data in json_data['annotations']}
         self.tokenizer = tokenizer
         self.label_2_id = label_2_id
         self.max_length = max_length
@@ -181,7 +182,7 @@ class SpanClassificationTestDataset(Dataset):
 
             ### 2. NER/REGEX 추출 알고리즘 갖고오기
             # 2-1. Regex 추출 알고리즘
-            regex_texts = run_pii_detection(sentence)
+            regex_texts = run_regex_detection(sentence)
             str_find_start_idx = 0
             for span_text in regex_texts:
                 # 혜주 : "정규표현식으로 뽑히는 모든것은 개인정보야!" 일동 : "ㅇㅋ"
@@ -243,7 +244,7 @@ class SpanClassificationTestDataset(Dataset):
                     })
 
             # 2-2. NER 추출 알고리즘
-            ner_texts = run_ner(sentence)
+            ner_texts = run_ner_detection(sentence)
             str_find_start_idx = 0
             for span_text in ner_texts:
                 # 완철 : "NER로 뽑히는 모든것은 개인정보야!" 일동 : "ㅇㅋ"
@@ -471,7 +472,7 @@ class SpanClassificationTestDataset(Dataset):
         
         print(f"[Total instances]\nLabel & ids : {self.label_2_id}\nnums : {samples_num}\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n")
         instance_df = pd.DataFrame(self.instances)
-        instance_df.to_csv(f'../DatasetInstanceSamples/{self.test_name}_test_dataset_samples.csv', index=False)
+        instance_df.to_csv(f'DatasetInstanceSamples/{self.test_name}_test_dataset_samples.csv', index=False)
         
         conn.close()
 
@@ -501,21 +502,33 @@ class SpanClassificationTestDataset(Dataset):
 
 
 
-def load_all_json(json_dir="../Data"):
+def load_all_json(json_dir="Data"):
     """Dataset 클래스에 로딩하기 위해 모든 문장별 JSON 파일의 데이터를 병합하는 함수
 
     Args:
-        json_dir (str, optional): 문장별 JSON 파일이 있는 폴더 경로. Defaults to "../Data".
+        json_dir (str, optional): 문장별 JSON 파일이 있는 폴더 경로. Defaults to "Data".
 
     Returns:
         dict: 모든 데이터들이 병합된 결과물
     """
-    all_data = {"data": []}
+    all_data = {"data": [], "annotations": []}
     
     for file_name in os.listdir(json_dir):
         if file_name.endswith(".json"):
             with open(os.path.join(json_dir, file_name), "r", encoding='utf-8') as f:
                 json_file = json.load(f)
                 all_data["data"].append( json_file["data"] )
+                all_data["annotations"].append( json_file["annotations"] )
+
+    # for root, dirs, files in os.walk(json_dir):
+    #     for file in files:
+    #         if file.endswith(".json"):
+    #             try:
+    #                 with open(os.path.join(json_dir, file), "r", encoding='utf-8') as f:
+    #                     json_file = json.load(f)
+    #                     all_data["data"].append( json_file["data"] )
+    #                     all_data["annotations"].append( json_file['annotations'] )
+    #             except Exception as e:
+    #                 print(e)
     
     return all_data

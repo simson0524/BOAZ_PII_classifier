@@ -5,8 +5,8 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 from torch.utils.data import DataLoader
-from model import SpanPIIClassifier
-from train_dataset import SpanClassificationTrainDataset, load_all_json
+from PIIClassifier.model import SpanPIIClassifier
+from PIIClassifier.train_dataset import SpanClassificationTrainDataset, load_all_json
 import pandas as pd
 import torch
 import yaml
@@ -57,7 +57,7 @@ def train_loop(model, dataloader, optimizer, device, tqdm_disable=False):
     return total_loss / len(dataloader)
 
 # Evaluation
-def evaluate(model, dataloader, device, tqdm_disable=False, is_best_model=False, tokenizer=None, train_name='test'):
+def evaluate(model, dataloader, device, label_2_id, tqdm_disable=False, is_best_model=False, tokenizer=None, train_name='test'):
     model.eval()
     total_loss = 0
     loss_fn = torch.nn.CrossEntropyLoss()
@@ -113,6 +113,11 @@ def evaluate(model, dataloader, device, tqdm_disable=False, is_best_model=False,
                                 mismatched_item['span_text'] = None
                         
                         mismatches.append( mismatched_item )
+
+    metric = [ [0 for i in range(len(label_2_id))] for _ in range(len(label_2_id)) ]
+
+    for i, (pred, gt) in enumerate(zip(preds, targets)):
+        metric[pred][gt] += 1
                             
     avg_loss = total_loss / len(dataloader)
     precision = precision_score(targets, preds, average="macro", zero_division=0)
@@ -121,14 +126,14 @@ def evaluate(model, dataloader, device, tqdm_disable=False, is_best_model=False,
 
     if is_best_model:
         result_df = pd.DataFrame(mismatches)
-        result_df.to_csv(f"../ValidationSamples/{train_name}_validation_samples.csv", index=False)
+        result_df.to_csv(f"ValidationSamples/{train_name}_validation_samples.csv", index=False)
 
-    return avg_loss, precision, recall, f1
+    return avg_loss, precision, recall, f1, metric
 
 
-if __name__ == "__main__":
-    # Load config from "train_config.yaml"
-    with open('train_config.yaml', 'r', encoding='utf-8') as f:
+def train(config_file_path='run_config.yaml'):
+    # Load config from "run_config.yaml"
+    with open(config_file_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
     # Load model and tokenizer
@@ -139,24 +144,21 @@ if __name__ == "__main__":
 
     # Set train config
     tqdm_disable = False
-    train_name = config['train']['train_name']
-    batch_size = config['train']['batch_size']
-    num_epochs = config['train']['num_epochs']
-    learning_rate = config['train']['learning_rate']
-    is_pii = config['train']['is_pii']
+    train_name = config['exp']['name']
+    batch_size = config['exp']['batch_size']
+    num_epochs = config['exp']['num_epochs']
+    learning_rate = float(config['exp']['learning_rate'])
+    is_pii = config['exp']['is_pii']
     max_length = 256
-    device = torch.device( config['train']['device'] )
-    print(f"=====[ Train CONFIG INFO ]====\nBatch_size : {batch_size}\nNum_epochs : {num_epochs}\nLearning_rate : {learning_rate}\nMax_length : {max_length}\nDevice : {device}\n\n")
+    device = torch.device( config['exp']['device'] )
+    print(f"=====[ Train CONFIG INFO ]====\nBatch_size : {batch_size}({type(batch_size)})\nNum_epochs : {num_epochs}({type(num_epochs)})\nLearning_rate : {learning_rate}({type(learning_rate)})\nMax_length : {max_length}({type(max_length)})\nDevice : {device}({type(device)})\n\n")
 
     # Load data
-    json_data_dir = config['data']['data_dir']
-    all_json_data = load_all_json( json_data_dir )
+    train_data_dir = config['data']['train_data_dir']
+    validation_data_dir = config['data']['test_data_dir']
+    train_json = load_all_json( train_data_dir )
+    valid_json = load_all_json( validation_data_dir )
 
-    # Split data into train and valid
-    train_json, valid_json = {}, {}
-    train_json["data"], valid_json["data"] = train_test_split(all_json_data["data"],
-                                                              test_size=0.2,
-                                                              random_state=42)
     # Dataset 
     if is_pii:
         label_2_id = config['label_mapping']['pii_label_2_id']
@@ -166,7 +168,9 @@ if __name__ == "__main__":
         train_name=train_name,
         json_data=train_json, 
         tokenizer=tokenizer, 
-        label_2_id=label_2_id, 
+        label_2_id=label_2_id,
+        sampling_ratio=2.0, 
+        is_valid=True, 
         is_pii=is_pii, 
         max_length=max_length
         )
@@ -174,7 +178,9 @@ if __name__ == "__main__":
         train_name=train_name,
         json_data=valid_json, 
         tokenizer=tokenizer, 
-        label_2_id=label_2_id, 
+        label_2_id=label_2_id,
+        sampling_ratio=1.0, 
+        is_valid=False, 
         is_pii=is_pii, 
         max_length=max_length
         )
@@ -200,17 +206,17 @@ if __name__ == "__main__":
     for epoch in range(1, num_epochs+1):
         print(f"\n==== Epoch {epoch} ====")
         train_loss = train_loop(model, train_loader, optimizer, device, tqdm_disable)
-        val_loss, val_prec, val_rec, val_f1 = evaluate(model, valid_loader, device, tqdm_disable)
+        val_loss, val_prec, val_rec, val_f1, val_metric = evaluate(model, valid_loader, device, label_2_id, tqdm_disable)
 
         print(f"[Train] Loss: {train_loss:.4f}")
-        print(f"[Valid] Loss: {val_loss:.4f} | Precision: {val_prec:.4f} | Recall: {val_rec:.4f} | F1: {val_f1:.4f}")
+        print(f"[Valid] Loss: {val_loss:.4f} | Precision: {val_prec:.4f} | Recall: {val_rec:.4f} | F1: {val_f1:.4f} | Metric: {val_metric}")
 
         # Save best model
         if val_f1 > best_f1:
             best_f1 = val_f1
-            os.makedirs("../Checkpoints", exist_ok=True)
-            model_path = os.path.join("../Checkpoints", f"{train_name}_best_model_{epoch}.pt")
+            os.makedirs("Checkpoints", exist_ok=True)
+            model_path = os.path.join("Checkpoints", f"{train_name}_best_model.pt")
             torch.save(model.state_dict(), model_path)
             print(f"✅ Best model saved! @[{model_path}]")
-            evaluate(model, valid_loader, device, tqdm_disable, is_best_model=True, tokenizer=tokenizer, train_name=train_name)
+            evaluate(model, valid_loader, device, label_2_id, tqdm_disable, is_best_model=True, tokenizer=tokenizer, train_name=train_name)
             print(f"✅ Unmatched samples info saved!")

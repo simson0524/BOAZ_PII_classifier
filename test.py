@@ -1,8 +1,8 @@
-# inference.py
+# PIIClassifier/test.py
 
-from ..DataPreprocessLogics.DBMS.db_sdk import get_connection, fetch_rows, delete_row, create_metric_tables, add_metric_rows, create_prediction_tables, truncate_tables, add_prediction_rows
-from .test_dataset import SpanClassificationTestDataset, load_all_json
-from .model import SpanPIIClassifier
+from DataPreprocessLogics.DBMS.db_sdk import get_connection, fetch_rows, delete_row, create_metric_tables, add_metric_rows, create_prediction_tables, truncate_tables, add_prediction_rows
+from PIIClassifier.test_dataset import SpanClassificationTestDataset, load_all_json
+from PIIClassifier.model import SpanPIIClassifier
 from sklearn.metrics import precision_score, recall_score, f1_score
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 from torch.utils.data import DataLoader
@@ -36,66 +36,65 @@ def test_1(dataloader, conn, label_2_id):
     metric = [ [0, 0, 0] for _ in range(len(label_2_id)) ]
     
     for label, _ in label_2_id.items():
-        # "일반정보"사전은 없으므로!
-        if label == "일반정보":
-            continue
-        for batch in tqdm(dataloader, desc=f"[검증1] {label}사전 검증중..."):
-            batch_size = len( batch['sentence'] )
-            for i in range( batch_size ):
-                curr_span_text = batch['span_text'][i]
-                curr_label_id = batch['label'][i].item()
-                curr_dataset_idx = batch['idx'][i].item()
-                
-                # 현재 사전과 데이터의 라벨이 같은경우에만 아래 로직 실행해야 함
-                if (label_2_id[label] == curr_label_id) and (batch['validation_priority'][i] == 1):
-                    # 현재 사전에 SPAN_TEXT가 있는지 조회
-                    dict_result = fetch_rows(
-                        conn=conn,
-                        table_name=label,
-                        column_name="단어",
-                        keyword=curr_span_text
-                        ) # return : [(단어, 부서명, 문서명, 단어유형, 구분), ...]
-                    master_result = fetch_rows(
-                        conn=conn,
-                        table_name="정답지",
-                        column_name="단어",
-                        keyword=curr_span_text
-                        ) # return : [(단어, 부서명, 문서명, 단어유형, 구분), ...]
-
-                    # 사전 and 정답지에 있는 경우(정탐)
-                    if dict_result and master_result:
-                        flag = False
-                        for _, _, _, _, abs_label in master_result:
-                            if abs_label == label:
-                                flag = True
-                                break
-                        if flag:
-                            hit.append((curr_span_text, curr_dataset_idx))
-                            metric[label_2_id[label]][0] += 1
-                            continue
-
-                    # 사전에만 있는 경우(오탐, 사전에서 제외, validation_priority 2로 변경)
-                    if dict_result and not master_result:
-                        delete_row(
+        # "개인정보", "기밀정보"사전만 대조하므로!
+        if label == "개인정보" or label == "기밀정보":
+            for batch in tqdm(dataloader, desc=f"[검증1] {label}사전 검증중..."):
+                batch_size = len( batch['sentence'] )
+                for i in range( batch_size ):
+                    curr_span_text = batch['span_text'][i]
+                    curr_label_id = batch['label'][i].item()
+                    curr_dataset_idx = batch['idx'][i].item()
+                    
+                    # 현재 사전과 데이터의 라벨이 같은경우에만 아래 로직 실행해야 함
+                    if (label_2_id[label] == curr_label_id) and (batch['validation_priority'][i] == 1):
+                        # 현재 사전에 SPAN_TEXT가 있는지 조회
+                        dict_result = fetch_rows(
                             conn=conn,
                             table_name=label,
-                            word=curr_span_text
-                        )
-                        wrong.append((curr_span_text, curr_dataset_idx))
-                        metric[label_2_id[label]][1] += 1
-                        continue
+                            column_name="단어",
+                            keyword=curr_span_text
+                            ) # return : [(단어, 부서명, 문서명, 단어유형, 구분), ...]
+                        master_result = fetch_rows(
+                            conn=conn,
+                            table_name="정답지",
+                            column_name="단어",
+                            keyword=curr_span_text
+                            ) # return : [(단어, 부서명, 문서명, 단어유형, 구분), ...]
 
-                    # 정답지에만 있는 경우(미탐, validation_priority 2로 변경)
-                    if master_result and not dict_result:
-                        mismatch.append((curr_span_text, curr_dataset_idx))
-                        metric[label_2_id[label]][2] += 1
-                        continue
-                
+                        # 사전 and 정답지에 있는 경우(정탐)
+                        if dict_result and master_result:
+                            flag = False
+                            for _, _, _, _, abs_label in master_result:
+                                if abs_label == label:
+                                    flag = True
+                                    break
+                            if flag:
+                                hit.append((curr_span_text, curr_dataset_idx))
+                                metric[label_2_id[label]][0] += 1
+                                continue
+
+                        # 사전에만 있는 경우(오탐, 사전에서 제외, validation_priority 2로 변경)
+                        if dict_result and not master_result:
+                            delete_row(
+                                conn=conn,
+                                table_name=label,
+                                word=curr_span_text
+                            )
+                            wrong.append((curr_span_text, curr_dataset_idx))
+                            metric[label_2_id[label]][1] += 1
+                            continue
+
+                        # 정답지에만 있는 경우(미탐, validation_priority 2로 변경)
+                        if master_result and not dict_result:
+                            mismatch.append((curr_span_text, curr_dataset_idx))
+                            metric[label_2_id[label]][2] += 1
+                            continue
+                    
     
     return metric, hit, wrong, mismatch
 
 
-# TODO : 여기 좀 이상한가...? 지금??
+# TODO : 여기 좀 이상한가...? 지금?? 가져올 NER 클래스 목록 + REGEX이 없네
 def test_2(dataloader, conn, label_2_id):
     hit, wrong, mismatch = [], [], []
 
@@ -240,12 +239,12 @@ def test_3(model, device, dataloader, conn, label_2_id):
     return avg_loss, precision, recall, f1, metric, hit, wrong, mismatch       
 
 
-if __name__ == "__main__":
+def test(config_file_path='run_config.yaml'):
     # DB connection
     conn = get_connection()
 
-    # Load config from "train_config.yaml"
-    with open('test_config.yaml', 'r', encoding='utf-8') as f:
+    # Load config from "test_config.yaml"
+    with open(config_file_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
     # PRE SETTING
@@ -254,16 +253,12 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained( model_name, use_fast=True )
 
     # Test Config
-    test_name = config['test']['test_name']
-    batch_size = config['test']['batch_size']
-    is_pii = config['test']['is_pii']
-    device = torch.device( config['test']['device'] )
+    test_name = config['exp']['name']
+    batch_size = config['exp']['batch_size']
+    is_pii = config['exp']['is_pii']
+    device = torch.device( config['exp']['device'] )
     max_length = 256
     print(f"=====[ Test CONFIG INFO ]====\nBatch_size : {batch_size}\nMax_length : {max_length}\nDevice : {device}\n\n")
-
-    # Load data
-    json_data_dir = config['data']['data_dir']
-    all_json_data = load_all_json( json_data_dir )
 
     # Load model state
     if is_pii:
@@ -273,6 +268,7 @@ if __name__ == "__main__":
             num_labels=3
         ).to(device)
         state_dict = torch.load(state_path, map_location="cpu")
+        label_2_id = config['label_mapping']['pii_label_2_id']
     else:
         state_path = config['model']['confid_state_dir']
         classifier = SpanPIIClassifier(
@@ -280,16 +276,17 @@ if __name__ == "__main__":
             num_labels=2
         ).to(device)
         state_dict = torch.load(state_path, map_location="cpu")
+        label_2_id = config['label_mapping']['confid_label_2_id']
     classifier.load_state_dict( state_dict )
 
     # Dataset
-    test_dataset_dir = ""
+    test_dataset_dir = config['data']['test_data_dir']
     all_json_test_data = load_all_json( test_dataset_dir )
     test_dataset = SpanClassificationTestDataset(
         test_name=test_name,
         json_data=all_json_test_data,
         tokenizer=tokenizer,
-        label_2_id=pii_label_2_id,
+        label_2_id=label_2_id,
         is_pii=True,
         max_length=max_length
     )
@@ -351,6 +348,8 @@ if __name__ == "__main__":
         )
 
     # TODO : hit_2, hit_3을 사전등재리스트에 올리고 일정 기준에 의해 사전에 추가
+    # 사용할 NER 클래스명들 -> 무엇? 완철's DataPreprocessLogics/ner_based_doc_parsing/ner_main.py run_ner_detection()
+    # 사용할 정규표현식들 -> 무엇? 혜주's DataPreprocessLogics/regex_based_doc_parsing/pii_detector/main.py run_regex_detector()
 
     # DB에 데이터 저장 할 테이블이 없는 경우를 대비하여 생성해주기
     # "모델_개인", "모델_기밀", "검증1_개인", "검증2_개인", "검증3_개인", "검증1_기밀", "검증2_기밀", "검증3_기밀"
@@ -411,7 +410,7 @@ if __name__ == "__main__":
     create_prediction_tables(conn)
     truncate_tables(conn, "prediction")
 
-    # 검증3 오탐사항 추가
+    # 검증3 오탐사항 "prediction"테이블에 추가
     for span_text, gt, pred in wrong_3:
         curr_row = [(test_name, timestamp, span_text, None, gt, pred)]
         add_prediction_rows(
@@ -420,7 +419,7 @@ if __name__ == "__main__":
             rows=curr_row
             )
     
-    # 검증3 미탐사항 추가
+    # 검증3 미탐사항 "prediction"테이블에 추가
     for span_text, gt, pred in mismatch_3:
         curr_row = [(test_name, timestamp, span_text, None, gt, pred)]
         add_prediction_rows(

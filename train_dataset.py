@@ -8,7 +8,6 @@ from konlpy.tag import Okt
 from collections import defaultdict
 from tqdm.auto import tqdm
 from DataPreprocessLogics.DBMS.db_sdk import get_connection, find_words_in_sentence_for_doc
-from DataPreprocessLogics.regex_based_doc_parsing.pii_detector.main import run_pii_detection
 import pandas as pd
 import random
 import torch
@@ -17,17 +16,19 @@ import os
 
 
 class SpanClassificationTrainDataset(Dataset):
-    def __init__(self, train_name, json_data, tokenizer, label_2_id, is_pii=True, max_length=256):
+    def __init__(self, train_name, json_data, tokenizer, label_2_id, sampling_ratio, is_valid, is_pii=True, max_length=256):
         self.samples = {data['id']: data for data in json_data["data"]}
+        self.annotations = {data[0]['id']: data[0]['annotations'] for data in json_data['annotations']}
         self.tokenizer = tokenizer
         self.label_2_id = label_2_id
         self.max_length = max_length
         self.train_name = train_name
         self.instances = []
+        self.mode = 'train' if is_valid else 'valid'
         self.okt = Okt()
         self.is_pii = is_pii
         self._create_instances()
-        self._instance_post_processing()
+        self._instance_post_processing(ratio=sampling_ratio)
 
 
     def _create_instances(self):
@@ -35,7 +36,7 @@ class SpanClassificationTrainDataset(Dataset):
             char_start = sentence.find(span_text, str_find_start_idx)
 
             if char_start == -1: # 만약 문장 내 span_text가 없다면
-                print(f"No matched SPAN_TEXT({span_text}) in SENTENCE({sentence})\n\n")
+                print(f"No matched SPAN_TEXT({span_text}) in SENTENCE({sentence})  str_find_start_idx:{str_find_start_idx}\n\n")
                 return None, None, str_find_start_idx
             else: # 만약 문장 내 span_text가 있다면
                 char_end = char_start + len(span_text)
@@ -84,14 +85,13 @@ class SpanClassificationTrainDataset(Dataset):
             special_ids = set(self.tokenizer.all_special_ids)
             is_extracted = [ token_id in special_ids for token_id in input_ids ]
 
-            # 1. 정답지에 있는 친구들 기준으로 우선 추출
-            span_texts = find_words_in_sentence_for_doc(
-                conn=conn,
-                sentence=sentence,
-                table_name="정답지",
-            )
+            # 1. annotations에 있는 친구들 기준으로 우선 추출
+            span_texts = []
+            for annotations_dict in self.annotations[id]:
+                span_texts.append( (annotations_dict['span_text'], annotations_dict['label']) )
+            
 
-            # 1-1. 정답지에서 추출한 친구들을 인스턴스 추출
+            # 1-1. annotations에서 추출한 친구들을 인스턴스 추출
             str_find_start_idx = 0
             for span_text, label in span_texts:
                 if self.is_pii:
@@ -158,7 +158,7 @@ class SpanClassificationTrainDataset(Dataset):
 
 
 
-            # 2. okt를 이용한 Span후보가 될 수 있는 POS tag 목록
+            # 2. okt를 이용한 Span후보가 될 수 있는 POS tag 목록(only for "일반정보")
             target_pos = {"Noun", "Number", "Email", "URL", "Foreign", "Alpha"}
             POS_in_sentence = self.okt.pos( sentence )
 
@@ -241,7 +241,7 @@ class SpanClassificationTrainDataset(Dataset):
                     PRE_LOOP_DECODED_SPAN_IDs = CURR_LOOP_DECODED_SPAN_IDs
                     
             
-        print(f"[Total instances]\nLabel & ids : {self.label_2_id}\nnums : {samples_num}\ntruncated sents : {span_truncated_sent_skipped}\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n")
+        print(f"[Total instances({self.mode})]\nLabel & ids : {self.label_2_id}\nnums : {samples_num}\ntruncated sents : {span_truncated_sent_skipped}\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n")
         
         conn.close()
 
@@ -249,10 +249,15 @@ class SpanClassificationTrainDataset(Dataset):
     def _instance_post_processing(self, ratio=1.0):
         # 기존 self.instance에 최종 결과를 저장하기 위해 memory 재할당
         instances = self.instances
-        self.instances = []
+
+        zero_instances = []
+        non_zero_instance = []
 
         # 로그용
         skipped = 0
+        total_instances = 0
+        samples_num = [0 for _ in range( len(self.label_2_id) )]
+
 
         # instance별 순회
         for i in range( len(instances)-1 ):
@@ -265,16 +270,37 @@ class SpanClassificationTrainDataset(Dataset):
             if (instances[i]['label'] == 0) and (instances[i]['token_end'] - instances[i]['token_start'] <= 1):
                 skipped += 1
                 continue
-                
-            self.instances.append( instances[i] )
+            
+            curr_instance = instances[i]
+            total_instances += 1
+            samples_num[curr_instance['label']] += 1
 
-        # 마지막 instance append
-        self.instances.append( instances[-1] )
+            if curr_instance['label'] == 0:
+                zero_instances.append( curr_instance )
+            else:
+                non_zero_instance.append( curr_instance )
+        
+        # label:0에 대한 Downsampling target 개수 설정
+        sampling_target_num = min(int(max(samples_num[1:])*ratio), samples_num[0]) if len(samples_num) > 1 else 0
+        
+        # label:0에 대한 Downsampling
+        zero_instances = random.sample( zero_instances, sampling_target_num )
+        
+        # 제외된 인스턴스 수
+        gap = samples_num[0] - len(zero_instances)
+
+        # Downsampling된 숫자로 갱신
+        samples_num[0] = len(zero_instances)
+
+        # 데이터 재할당 및 shuffle
+        self.instances = zero_instances + non_zero_instance
+        random.shuffle( self.instances )
+
 
         # 후처리 결과
-        print(f"[instance 후처리 완료] \n후처리 instance 수 : {skipped}\n\n\n\n")
+        print(f"[instance 후처리 완료({self.mode})] \n건너뛴 instance 수 : {skipped}\n사용되는 instance 수 : {total_instances}\n제외된 instance 수 : {gap}\nLabel & ids : {self.label_2_id}\nnums : {samples_num}\n\n\n\n")
         instance_df = pd.DataFrame(self.instances)
-        instance_df.to_csv(f'../DatasetInstanceSamples/{self.train_name}_train_dataset_samples.csv', index=False)
+        instance_df.to_csv(f'DatasetInstanceSamples/{self.train_name}_{self.mode}_dataset_samples.csv', index=False)
 
 
     def __getitem__(self, idx):
@@ -432,7 +458,7 @@ class OriginSpanClassificationDataset(Dataset):
 
         instance_df = pd.DataFrame(self.instances)
 
-        instance_df.to_csv(f'../DatasetInstanceSamples/{self.train_name}_dataset_samples.csv', index=False)
+        instance_df.to_csv(f'DatasetInstanceSamples/{self.train_name}_dataset_samples.csv', index=False)
         
 
     def __getitem__(self, idx):
@@ -451,21 +477,34 @@ class OriginSpanClassificationDataset(Dataset):
         return len(self.instances)
 
 
-def load_all_json(json_dir="../Data"):
+def load_all_json(json_dir="Data"):
     """Dataset 클래스에 로딩하기 위해 모든 문장별 JSON 파일의 데이터를 병합하는 함수
 
     Args:
-        json_dir (str, optional): 문장별 JSON 파일이 있는 폴더 경로. Defaults to "../Data".
+        json_dir (str, optional): 문장별 JSON 파일이 있는 폴더 경로. Defaults to "Data".
 
     Returns:
         dict: 모든 데이터들이 병합된 결과물
     """
-    all_data = {"data": []}
+    all_data = {"data": [], 'annotations': []}
     
     for file_name in os.listdir(json_dir):
         if file_name.endswith(".json"):
             with open(os.path.join(json_dir, file_name), "r", encoding='utf-8') as f:
                 json_file = json.load(f)
                 all_data["data"].append( json_file["data"] )
+                all_data["annotations"].append( json_file['annotations'] )
     
+    # for root, dirs, files in os.walk(json_dir):
+    #     for directory in dirs:
+    #         for file in files:
+    #             if file.endswith(".json"):
+    #                 try:
+    #                     with open(os.path.join(json_dir, directory, file), "r", encoding='utf-8') as f:
+    #                         json_file = json.load(f)
+    #                         all_data["data"].append( json_file["data"] )
+    #                         all_data["annotations"].append( json_file['annotations'] )
+    #                 except Exception as e:
+    #                     print(e)
+                    
     return all_data
