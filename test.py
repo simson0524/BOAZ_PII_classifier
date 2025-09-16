@@ -340,12 +340,16 @@ def test(config_file_path='run_config.yaml'):
     
     # 검증3
     avg_loss, precision, recall, f1, metric_3, hit_3, wrong_3, mismatch_3 = test_3(
-        model=model,
+        model=classifier,
         device=device, 
         dataloader=test_dataloader_3, 
         conn=conn, 
         label_2_id=label_2_id
         )
+
+    print(f"[Metric_1]\n{metric_1}")
+    print(f"[Metric_2]\n{metric_2}")
+    print(f"[Metric_3]\n{metric_3}")
 
     # TODO : hit_2, hit_3을 사전등재리스트에 올리고 일정 기준에 의해 사전에 추가
     # 사용할 NER 클래스명들 -> 무엇? 완철's DataPreprocessLogics/ner_based_doc_parsing/ner_main.py run_ner_detection()

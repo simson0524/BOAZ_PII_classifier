@@ -11,6 +11,7 @@ from DataPreprocessLogics.DBMS.db_sdk import get_connection, find_words_in_sente
 from DataPreprocessLogics.regex_based_doc_parsing.pii_detector.main import run_regex_detection
 from DataPreprocessLogics.ner_based_doc_parsing.ner_main import run_ner_detection
 import pandas as pd
+import ahocorasick
 import random
 import torch
 import json
@@ -129,7 +130,9 @@ class SpanClassificationTestDataset(Dataset):
                         "label": label_id,
                         "validation_priority": 1
                     })
-            
+        
+        ### ----------------------------------------------------- ###
+
         # 로그용
         no_span_skipped = 0
         span_truncated_sent_skipped = 0
@@ -185,6 +188,7 @@ class SpanClassificationTestDataset(Dataset):
             regex_texts = run_regex_detection(sentence)
             str_find_start_idx = 0
             for span_text in regex_texts:
+                span_text = span_text['단어']
                 # 혜주 : "정규표현식으로 뽑히는 모든것은 개인정보야!" 일동 : "ㅇㅋ"
                 label = "개인정보" 
                 
@@ -247,6 +251,7 @@ class SpanClassificationTestDataset(Dataset):
             ner_texts = run_ner_detection(sentence)
             str_find_start_idx = 0
             for span_text in ner_texts:
+                span_text = span_text['단어']
                 # 완철 : "NER로 뽑히는 모든것은 개인정보야!" 일동 : "ㅇㅋ"
                 label = "개인정보" 
                 
