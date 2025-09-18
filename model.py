@@ -15,6 +15,8 @@ class SpanPIIClassifier(nn.Module):
             nn.Linear(self.hidden_size, num_labels)
         )
 
+        # TODO : Focal Loss ;;;
+
     def forward(self, input_ids, attention_mask, token_start, token_end):
         outputs = self.pretrained_bert(
             input_ids=input_ids, # shape: (batch_size, token_len)

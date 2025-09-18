@@ -1,13 +1,16 @@
 # PIIClassifier/test.py
 
-from DataPreprocessLogics.DBMS.db_sdk import get_connection, fetch_rows, delete_row, create_metric_tables, add_metric_rows, create_prediction_tables, truncate_tables, add_prediction_rows
-from PIIClassifier.test_dataset import SpanClassificationTestDataset, load_all_json
+from DataPreprocessLogics.DBMS.db_sdk import *
+from PIIClassifier.train_dataset import SpanClassificationTrainDataset, load_all_json
 from PIIClassifier.model import SpanPIIClassifier
+from DataPreprocessLogics.regex_based_doc_parsing.pii_detector.main import run_regex_detection
+from DataPreprocessLogics.ner_based_doc_parsing.ner_main import run_ner_detection
 from sklearn.metrics import precision_score, recall_score, f1_score
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 from torch.utils.data import DataLoader
 from datetime import datetime
 from tqdm import tqdm
+import random
 import torch
 import yaml
 
@@ -28,7 +31,7 @@ import yaml
     미탐 : 추출된 Span의 Inference 결과가 "일반"인데, 정답지에 "일반"이 아닌 상태로 존재하는 경우
 """
 
-def test_1(dataloader, conn, label_2_id):
+def test_1(dataloader, conn, label_2_id, id_2_label, is_pii=True):
     hit, wrong, mismatch = [], [], []
 
     # column_name = [정탐, 오탐, 미탐]
@@ -36,66 +39,53 @@ def test_1(dataloader, conn, label_2_id):
     metric = [ [0, 0, 0] for _ in range(len(label_2_id)) ]
     
     for label, _ in label_2_id.items():
-        # "개인정보", "기밀정보"사전만 대조하므로!
-        if label == "개인정보" or label == "기밀정보":
-            for batch in tqdm(dataloader, desc=f"[검증1] {label}사전 검증중..."):
-                batch_size = len( batch['sentence'] )
-                for i in range( batch_size ):
-                    curr_span_text = batch['span_text'][i]
-                    curr_label_id = batch['label'][i].item()
-                    curr_dataset_idx = batch['idx'][i].item()
-                    
-                    # 현재 사전과 데이터의 라벨이 같은경우에만 아래 로직 실행해야 함
-                    if (label_2_id[label] == curr_label_id) and (batch['validation_priority'][i] == 1):
-                        # 현재 사전에 SPAN_TEXT가 있는지 조회
-                        dict_result = fetch_rows(
-                            conn=conn,
-                            table_name=label,
-                            column_name="단어",
-                            keyword=curr_span_text
-                            ) # return : [(단어, 부서명, 문서명, 단어유형, 구분), ...]
-                        master_result = fetch_rows(
-                            conn=conn,
-                            table_name="정답지",
-                            column_name="단어",
-                            keyword=curr_span_text
-                            ) # return : [(단어, 부서명, 문서명, 단어유형, 구분), ...]
+        # 모델별 가능한 라벨 솎아내기
+        if label == "개인정보" and is_pii==True:
+            print("1단계 검증(개인정보사전 매칭) 진행")
+        elif label == "기밀정보" and is_pii==False:
+            print("1단계 검증(기밀정보사전 매칭) 진행")
+        else:
+            continue
 
-                        # 사전 and 정답지에 있는 경우(정탐)
-                        if dict_result and master_result:
-                            flag = False
-                            for _, _, _, _, abs_label in master_result:
-                                if abs_label == label:
-                                    flag = True
-                                    break
-                            if flag:
-                                hit.append((curr_span_text, curr_dataset_idx))
-                                metric[label_2_id[label]][0] += 1
-                                continue
+        # 데이터베이스 내용 미리 set으로 추출하여 Hash로 비교
+        table_set = load_word_set(
+            conn=conn,
+            table_name=label
+        )
 
-                        # 사전에만 있는 경우(오탐, 사전에서 제외, validation_priority 2로 변경)
-                        if dict_result and not master_result:
-                            delete_row(
-                                conn=conn,
-                                table_name=label,
-                                word=curr_span_text
-                            )
-                            wrong.append((curr_span_text, curr_dataset_idx))
-                            metric[label_2_id[label]][1] += 1
-                            continue
+        for batch in tqdm(dataloader, desc=f"[검증1] {label}사전 검증중..."):
+            batch_size = len( batch['sentence'] )
+            for i in range( batch_size ):
+                curr_sentence = batch['sentence'][i]
+                curr_span_text = batch['span_text'][i]
+                curr_gt_label_id = batch['label'][i].item()
+                curr_dataset_idx = batch['idx'][i].item()
+                curr_is_validated = batch['is_validated'][i]
+                curr_file_name = batch['file_name'][i]
+                curr_sent_seq = batch['sequence'][i]
 
-                        # 정답지에만 있는 경우(미탐, validation_priority 2로 변경)
-                        if master_result and not dict_result:
-                            mismatch.append((curr_span_text, curr_dataset_idx))
-                            metric[label_2_id[label]][2] += 1
-                            continue
-                    
+                # 정탐인 경우
+                if label_2_id[label] == curr_gt_label_id and (curr_span_text in table_set):
+                    hit.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
+                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
+                    continue
+
+                # 미탐인 경우
+                if (curr_span_text not in table_set) and (label_2_id[label] == curr_gt_label_id):
+                    mismatch.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
+                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
+                    continue
+
+                # 오탐인 경우
+                if (curr_span_text in table_set) and (label_2_id[label] != curr_gt_label_id):
+                    wrong.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
+                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
+                    continue             
     
     return metric, hit, wrong, mismatch
 
 
-# TODO : 여기 좀 이상한가...? 지금?? 가져올 NER 클래스 목록 + REGEX이 없네
-def test_2(dataloader, conn, label_2_id):
+def test_2(dataloader, conn, label_2_id, id_2_label, is_pii=True):
     hit, wrong, mismatch = [], [], []
 
     # column_name = [정탐, 오탐, 미탐]
@@ -103,66 +93,63 @@ def test_2(dataloader, conn, label_2_id):
     metric = [ [0, 0, 0] for _ in range(len(label_2_id)) ]
 
     for label, _ in label_2_id.items():
-        # "일반정보"인 NER/REGEX는 없으므로!
-        if label == "일반정보":
+        # 모델별 가능한 라벨 솎아내기
+        if label == "개인정보" and is_pii==True:
+            print("2단계 검증(REGEX/NER 매칭) 진행")
+        elif label == "기밀정보" and is_pii==False:
+            print("2단계 검증(REGEX/NER 매칭) 진행")
+        else:
             continue
-        for batch in tqdm(dataloader, desc=f"[검증2] {label} 데이터 NER/REGEX 검증중..."):
+
+        for batch in tqdm(dataloader, desc=f"[검증2] 검증중..."):
             batch_size = len( batch['sentence'] )
             for i in range( batch_size ):
+                curr_sentence = batch['sentence'][i]
                 curr_span_text = batch['span_text'][i]
-                curr_label_id = batch['label'][i].item()
+                curr_gt_label_id = batch['label'][i].item()
                 curr_dataset_idx = batch['idx'][i].item()
+                curr_is_validated = batch['is_validated'][i]
+                curr_file_name = batch['file_name'][i]
+                curr_sent_seq = batch['sequence'][i]
+
+                # 앞 단계에서 이미 검증된 경우 건너뜀
+                if curr_is_validated:
+                    continue
                 
-                # 현재 사전과 데이터의 라벨이 같은경우에만 아래 로직 실행해야 함
-                if (label_2_id[label] == curr_label_id) and (batch['validation_priority'][i] == 2):
-                    # 현재 사전에 SPAN_TEXT가 있는지 조회
-                    dict_result = fetch_rows(
-                        conn=conn,
-                        table_name=label,
-                        column_name="단어",
-                        keyword=curr_span_text
-                        ) # return : [(단어, 부서명, 문서명, 단어유형, 구분), ...]
-                    master_result = fetch_rows(
-                        conn=conn,
-                        table_name="정답지",
-                        column_name="단어",
-                        keyword=curr_span_text
-                        ) # return : [(단어, 부서명, 문서명, 단어유형, 구분), ...]
-
-                    # 사전 and 정답지에 있는 경우(정탐, 사전등재리스트)
-                    if dict_result and master_result:
-                        flag = False
-                        for _, _, _, _, abs_label in master_result:
-                            if abs_label == label:
-                                flag = True
-                                break
-                        if flag:
-                            hit.append((curr_span_text, curr_dataset_idx))
-                            metric[label_2_id[label]][0] += 1
-                            continue
-
-                    # 사전에만 있는 경우(오탐, validation_priority 3으로 변경)
-                    if dict_result and not master_result:
-                        delete_row(
-                            conn=conn,
-                            table_name=label,
-                            word=curr_span_text
-                        )
-                        wrong.append((curr_span_text, curr_dataset_idx))
-                        metric[label_2_id[label]][1] += 1
-                        continue
-
-                    # 정답지에만 있는 경우(미탐, validation_priority 3으로 변경)
-                    if master_result and not dict_result:
-                        mismatch.append((curr_span_text, curr_dataset_idx))
-                        metric[label_2_id[label]][2] += 1
-                        continue
+                # 정탐인 경우 - REGEX 추출
+                regex_texts = run_regex_detection(curr_sentence)
+                regex_spans = {regex_dict['단어'] for regex_dict in regex_texts}
                 
-    # 여기서 hit의 요소들은 사전등재후보리스트
-    return metric, hit, wrong, mismatch        
+                # REGEX 매칭되는 것이 있다면
+                if (curr_span_text in regex_spans) and (label_2_id[label] == curr_gt_label_id):
+                    hit.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
+                    continue
+
+                # 정탐인 경우 - NER 추출
+                ner_texts = run_ner_detection(curr_sentence)
+                ner_spans = {ner_dict['단어'] for ner_dict in ner_texts}
+
+                # NER 매칭되는 것이 있다면
+                if (curr_span_text in ner_spans) and (label_2_id[label] == curr_gt_label_id):
+                    hit.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
+                    continue
+                
+                # 미탐인 경우
+                if (label_2_id[label] == curr_gt_label_id) and (curr_span_text not in regex_spans) and (curr_span_text not in ner_spans):
+                    mismatch.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
+                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
+                    continue
+
+                # 오탐인 경우
+                if ((curr_span_text in regex_spans) or (curr_span_text in ner_spans)) and (label_2_id[label] != curr_gt_label_id):
+                    wrong.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
+                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
+                    continue               
+    
+    return metric, hit, wrong, mismatch
 
 
-def test_3(model, device, dataloader, conn, label_2_id):
+def test_3(model, device, dataloader, conn, label_2_id, id_2_label):
     model.eval()
 
     # 배치 별 샘플수가 다를 수 있으므로 sum후 마지막에 나눔
@@ -187,11 +174,11 @@ def test_3(model, device, dataloader, conn, label_2_id):
             token_end = batch["token_end"].to(device)
             labels = batch["label"].to(device)
 
-            valid_priority_list = batch["validation_priority"]
-            vp3_list = [ i for i, v in enumerate(valid_priority_list) if v == 3 ]
+            is_valid_list = batch["is_validated"]
+            validated_list = [ i for i, v in enumerate(is_valid_list) if v == False ]
 
-            # vp3_list가 없으면 "validation_priority"가 3인 친구가 없다는 의미이므로 건너띔
-            if len( vp3_list ) == 0:
+            # validated_list가 없으면 "is_validated"가 False인 친구가 없다는 의미이므로 건너띔
+            if len( validated_list ) == 0:
                 continue
 
             outputs = model(input_ids=input_ids,
@@ -200,25 +187,25 @@ def test_3(model, device, dataloader, conn, label_2_id):
                             token_end=token_end)
             logits = outputs["logits"]
 
-            # validation priority==3 인 친구들만 추출
-            vp3 = torch.tensor(vp3_list, device=device, dtype=torch.long)
+            # is_validated==False 인 친구들만 추출
+            vp3 = torch.tensor(validated_list, device=device, dtype=torch.long)
             vp3_logits = torch.index_select(logits, dim=0, index=vp3)
             vp3_labels = torch.index_select(labels, dim=0, index=vp3)
             vp3_preds = torch.argmax(vp3_logits, dim=-1)
 
-            # validation priority==3 인 친구들만 처리
+            # is_validated==False 인 친구들만 처리
             for i, vp3_idx in enumerate(vp3):
                 gt = int( vp3_labels[i].item() )
                 pred = int( vp3_preds[i].item() )
-                metric[gt][pred] += 1
+                metric[pred][gt] += 1
 
                 # 검증 마지막 단계이므로 정탐/오탐/미탐 별 (SPAN_TEXT, GT_LABEL, PRED_LABEL)을 hit, wrong, mismatch에 append
                 if gt == pred:
-                    hit.append( (batch['span_text'][vp3_idx], gt, pred) )
+                    hit.append( (batch['span_text'][vp3_idx], None, batch['sentence'][vp3_idx], id_2_label[gt], id_2_label[pred], batch['file_name'][vp3_idx], batch['sequence'][vp3_idx]) )
                 if pred != 0 and pred != gt:
-                    wrong.append( (batch['span_text'][vp3_idx], gt, pred) )
+                    wrong.append( (batch['span_text'][vp3_idx], None, batch['sentence'][vp3_idx], id_2_label[gt], id_2_label[pred], batch['file_name'][vp3_idx], batch['sequence'][vp3_idx]) )
                 if pred == 0 and pred != gt:
-                    mismatch.append( (batch['span_text'][vp3_idx], gt, pred) )
+                    mismatch.append( (batch['span_text'][vp3_idx], None, batch['sentence'][vp3_idx], id_2_label[gt], id_2_label[pred], batch['file_name'][vp3_idx], batch['sequence'][vp3_idx]) )
 
             # Loss
             loss = loss_fn(vp3_logits, vp3_labels)
@@ -269,6 +256,7 @@ def test(config_file_path='run_config.yaml'):
         ).to(device)
         state_dict = torch.load(state_path, map_location="cpu")
         label_2_id = config['label_mapping']['pii_label_2_id']
+        id_2_label = config['label_mapping']['pii_id_2_label']
     else:
         state_path = config['model']['confid_state_dir']
         classifier = SpanPIIClassifier(
@@ -277,16 +265,20 @@ def test(config_file_path='run_config.yaml'):
         ).to(device)
         state_dict = torch.load(state_path, map_location="cpu")
         label_2_id = config['label_mapping']['confid_label_2_id']
+        id_2_label = config['label_mapping']['confid_id_2_label']
     classifier.load_state_dict( state_dict )
 
     # Dataset
     test_dataset_dir = config['data']['test_data_dir']
     all_json_test_data = load_all_json( test_dataset_dir )
-    test_dataset = SpanClassificationTestDataset(
-        test_name=test_name,
+    all_json_test_data['data'] = random.sample( all_json_test_data['data'], int(len(all_json_test_data['data'])*0.2))
+    test_dataset = SpanClassificationTrainDataset(
+        train_name=test_name,
         json_data=all_json_test_data,
         tokenizer=tokenizer,
         label_2_id=label_2_id,
+        sampling_ratio=1.0,
+        is_valid=True,
         is_pii=True,
         max_length=max_length
     )
@@ -298,20 +290,19 @@ def test(config_file_path='run_config.yaml'):
     metric_1, hit_1, wrong_1, mismatch_1 = test_1(
         dataloader=test_dataloader_1,
         conn=conn,
-        label_2_id=label_2_id
+        label_2_id=label_2_id,
+        id_2_label=id_2_label,
+        is_pii=is_pii
     )
 
-    # 검증1의 오탐, 미탐 항목들의 validation_priority를 2로 만듦
-    for _, idx in wrong_1:
+    # 검증1의 정탐 항목들의 is_validated를 True로 만듦
+    for _, idx in hit_1:
         test_dataset.edit_validation_priority(
             idx=idx,
-            edit_to=2
+            edit_to=True
         )
-    for _, idx in mismatch_1:
-        test_dataset.edit_validation_priority(
-            idx=idx,
-            edit_to=2
-        )
+
+    print(f"\n[Metric_1]\n{metric_1}\n\n")
     
     # Dataloader(검증2)
     test_dataloader_2 = DataLoader(test_dataset, batch_size=1, shuffle=False)
@@ -320,20 +311,19 @@ def test(config_file_path='run_config.yaml'):
     metric_2, hit_2, wrong_2, mismatch_2 = test_2(
         dataloader=test_dataloader_2,
         conn=conn,
-        label_2_id=label_2_id
+        label_2_id=label_2_id,
+        id_2_label=id_2_label,
+        is_pii=is_pii
     )
 
-    # 검증2의 오탐, 미탐 항목들의 validation_priority를 3로 만듦
-    for _, idx in wrong_2:
+    # 검증2의 정탐 항목들의 is_validated를 True로 만듦
+    for _, idx in hit_2:
         test_dataset.edit_validation_priority(
             idx=idx,
-            edit_to=3
+            edit_to=True
         )
-    for _, idx in mismatch_2:
-        test_dataset.edit_validation_priority(
-            idx=idx,
-            edit_to=3
-        )
+
+    print(f"\n[Metric_2]\n{metric_2}\n\n")
 
     # Dataloader(검증3)
     test_dataloader_3 = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -344,12 +334,11 @@ def test(config_file_path='run_config.yaml'):
         device=device, 
         dataloader=test_dataloader_3, 
         conn=conn, 
-        label_2_id=label_2_id
+        label_2_id=label_2_id,
+        id_2_label=id_2_label
         )
 
-    print(f"[Metric_1]\n{metric_1}")
-    print(f"[Metric_2]\n{metric_2}")
-    print(f"[Metric_3]\n{metric_3}")
+    print(f"\n[Metric_3]\n{metric_3}\n\n")
 
     # TODO : hit_2, hit_3을 사전등재리스트에 올리고 일정 기준에 의해 사전에 추가
     # 사용할 NER 클래스명들 -> 무엇? 완철's DataPreprocessLogics/ner_based_doc_parsing/ner_main.py run_ner_detection()
