@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 from konlpy.tag import Okt
 from collections import defaultdict
 from tqdm.auto import tqdm
-from DataPreprocessLogics.DBMS.db_sdk import get_connection, find_words_in_sentence_for_doc
+from DataPreprocessLogics.DBMS.create_dbs import get_connection
 import pandas as pd
 import random
 import torch
@@ -67,6 +67,8 @@ class SpanClassificationTrainDataset(Dataset):
         # self.samples에 접근하여 각 문장데이터별로 span후보 모두 추출
         for id, sample_data in tqdm(self.samples.items(), desc="Create Trainset instances"):
             sentence = sample_data['sentence']
+            sentence_id = sample_data['id']
+            sentence_seq = sample_data['sequence']
             filename = sample_data['filename']
 
             # 토큰화(tokenizing)
@@ -146,6 +148,8 @@ class SpanClassificationTrainDataset(Dataset):
                 # 인스턴스 추가
                 self.instances.append({
                         "sentence": sentence,
+                        "sentence_id": sentence_id,
+                        "sentence_seq": sentence_seq,
                         "input_ids": input_ids,
                         "decoded_input_ids": decoded_input_ids,
                         "attention_mask": attention_mask,
@@ -224,6 +228,8 @@ class SpanClassificationTrainDataset(Dataset):
 
                     self.instances.append({
                         "sentence": sentence,
+                        "sentence_id": sentence_id,
+                        "sentence_seq": sentence_seq,
                         "input_ids": input_ids,
                         "decoded_input_ids": decoded_input_ids,
                         "attention_mask": attention_mask,
@@ -246,7 +252,7 @@ class SpanClassificationTrainDataset(Dataset):
                     PRE_LOOP_DECODED_SPAN_IDs = CURR_LOOP_DECODED_SPAN_IDs
                     
             
-        print(f"[Total instances({self.mode})]\nLabel & ids : {self.label_2_id}\nnums : {samples_num}\ntruncated sents : {span_truncated_sent_skipped}\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n")
+        print(f"[Total instances({self.mode})]\nLabel & ids : {self.label_2_id}\nnums : {samples_num}\ntruncated sents : {span_truncated_sent_skipped}\n")
         
         conn.close()
 
@@ -307,7 +313,7 @@ class SpanClassificationTrainDataset(Dataset):
         instance_df = pd.DataFrame(self.instances)
         instance_df.to_csv(f'DatasetInstanceSamples/{self.train_name}_{self.mode}_dataset_samples.csv', index=False)
 
-    def edit_validation_priority(self, idx, edit_to):
+    def edit_is_validated(self, idx, edit_to):
         self.instances[idx]["is_validated"] = edit_to
 
     def __getitem__(self, idx):
@@ -315,6 +321,8 @@ class SpanClassificationTrainDataset(Dataset):
         return {
             "idx": torch.tensor(idx),
             "sentence": item['sentence'],
+            "sentence_id": item['sentence_id'],
+            "sentence_seq": item['sentence_seq'],
             "input_ids": torch.tensor(item["input_ids"]),
             "decoded_input_ids": item["decoded_input_ids"],
             "attention_mask": torch.tensor(item["attention_mask"]),
@@ -323,7 +331,7 @@ class SpanClassificationTrainDataset(Dataset):
             "token_end": torch.tensor(item["token_end"]),
             "label": torch.tensor(item["label"]),
             "is_validated": item["is_validated"],
-            "file_name": item["filename"]
+            "file_name": item["file_name"]
         }
     
     def __len__(self):

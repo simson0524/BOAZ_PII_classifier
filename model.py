@@ -6,7 +6,8 @@ import torch.nn.functional as F
 
 
 class SpanPIIClassifier(nn.Module):
-    def __init__(self, pretrained_bert, num_labels=4, use_focal=True, alpha=1.0, gamma=2.0, reduction="mean")        super().__init__()
+    def __init__(self, pretrained_bert, num_labels=4, use_focal=True, alpha=1.0, gamma=2.0, reduction="mean"):        
+        super().__init__()
         self.pretrained_bert = pretrained_bert
         self.hidden_size = pretrained_bert.config.hidden_size
         self.num_labels = num_labels

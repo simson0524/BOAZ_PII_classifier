@@ -7,6 +7,9 @@ from transformers import AutoModel, AutoTokenizer, AutoConfig
 from torch.utils.data import DataLoader
 from PIIClassifier.model import SpanPIIClassifier
 from PIIClassifier.train_dataset import SpanClassificationTrainDataset, load_all_json
+from DataPreprocessLogics.DBMS.create_dbs import *
+from DataPreprocessLogics.DBMS.edit_dbs import *
+from datetime import datetime
 import pandas as pd
 import torch
 import yaml
@@ -57,7 +60,7 @@ def train_loop(model, dataloader, optimizer, device, tqdm_disable=False):
     return total_loss / len(dataloader)
 
 # Evaluation
-def evaluate(model, dataloader, device, label_2_id, tqdm_disable=False, is_best_model=False, tokenizer=None, train_name='test'):
+def evaluate(conn, experiment_name, model, epoch, dataloader, device, label_2_id, id_2_label, tqdm_disable=False, is_best_model=False, tokenizer=None, train_name='test'):
     model.eval()
     total_loss = 0
     loss_fn = torch.nn.CrossEntropyLoss()
@@ -65,7 +68,7 @@ def evaluate(model, dataloader, device, label_2_id, tqdm_disable=False, is_best_
     preds, targets = [], []
 
     # 불일치 샘플 목록
-    mismatches = []
+    model_train_sent_dataset_log = []
 
     with torch.no_grad():        
         for batch in tqdm(dataloader, total=len(dataloader), desc='evaluation', disable=tqdm_disable):
@@ -88,31 +91,24 @@ def evaluate(model, dataloader, device, label_2_id, tqdm_disable=False, is_best_
             targets.extend(labels.cpu().tolist())
 
             batch_size = labels.size(0)
-            if is_best_model:
-                for i in range(batch_size):
-                    pred = pred_labels[i].item()
-                    label = labels[i].item()
-                    if pred != label:
-                        mismatched_item = {
-                            'idx': int(batch['idx'][i].item()) if 'idx' in batch else None,
-                            'label': label,
-                            'pred': pred,
-                            'token_start': int(batch['token_start'][i].item()),
-                            'token_end': int(batch['token_end'][i].item()),
-                        }
+            for i in range(batch_size):
+                # model_train_sent_dataset_log 테이블에 들어가는 scheme
+                model_train_sent_dataset_log_scheme = (
+                    experiment_name,
+                    batch['sentence_id'][i],
+                    epoch,
+                    batch['sentence'][i],
+                    batch['span_text'][i],
+                    batch['idx'][i],
+                    id_2_label(labels[i]),
+                    id_2_label(pred_labels[i]),
+                    batch['file_name'][i],
+                    batch['sentence_seq'][i]
+                )
+                model_train_sent_dataset_log.append( model_train_sent_dataset_log_scheme )
 
-                        # sent와 span_text 복원
-                        if tokenizer is not None:
-                            attn = batch['attention_mask'][i].bool().cpu()
-                            ids = batch['input_ids'][i].cpu()[attn].tolist()
-                            try:
-                                mismatched_item['text'] = tokenizer.decode(ids, skip_special_tokens=True)
-                                mismatched_item['span_text'] = tokenizer.decode(batch['input_ids'][i][mismatched_item['token_start']:mismatched_item['token_end']], skip_special_tokens=True)
-                            except Exception:
-                                mismatched_item['text'] = None
-                                mismatched_item['span_text'] = None
-                        
-                        mismatches.append( mismatched_item )
+    # DB(model_train_sent_dataset_log)에 정보 추가하기
+    insert_many_rows(conn, "model_train_sent_dataset_log", model_train_sent_dataset_log)
 
     metric = [ [0 for i in range(len(label_2_id))] for _ in range(len(label_2_id)) ]
 
@@ -124,27 +120,25 @@ def evaluate(model, dataloader, device, label_2_id, tqdm_disable=False, is_best_
     recall = recall_score(targets, preds, average="macro", zero_division=0)
     f1 = f1_score(targets, preds, average="macro", zero_division=0)
 
-    if is_best_model:
-        result_df = pd.DataFrame(mismatches)
-        result_df.to_csv(f"ValidationSamples/{train_name}_validation_samples.csv", index=False)
-
     return avg_loss, precision, recall, f1, metric
 
 
-def train(config_file_path='run_config.yaml'):
-    # Load config from "run_config.yaml"
-    with open(config_file_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
+def train(experiment_name, config):
+    # 모델학습 시작시간
+    start_time = datetime.now()
 
-    # Load model and tokenizer
+    # DB connection
+    conn = get_connection()
+
+    # SETTING
     model_name = config['model']['model_name']
     model = AutoModel.from_pretrained( model_name )
     tokenizer = AutoTokenizer.from_pretrained( model_name, use_fast=True )
     print(f"=====[ MODEL CONFIG INFO ]=====\n{AutoConfig.from_pretrained( model_name )}\n\n")
 
-    # Set train config
+    # Train config
     tqdm_disable = False
-    train_name = config['exp']['name']
+    train_name = experiment_name
     batch_size = config['exp']['batch_size']
     num_epochs = config['exp']['num_epochs']
     learning_rate = float(config['exp']['learning_rate'])
@@ -162,14 +156,16 @@ def train(config_file_path='run_config.yaml'):
     # Dataset 
     if is_pii:
         label_2_id = config['label_mapping']['pii_label_2_id']
+        id_2_label = config['label_mapping']['pii_id_2_label']
     else:
         label_2_id = config['label_mapping']['confid_label_2_id']
+        id_2_label = config['label_mapping']['confid_id_2_label']
     train_dataset = SpanClassificationTrainDataset(
         train_name=train_name,
         json_data=train_json, 
         tokenizer=tokenizer, 
         label_2_id=label_2_id,
-        sampling_ratio=100.0, 
+        sampling_ratio=1.0, 
         is_valid=True, 
         is_pii=is_pii, 
         max_length=max_length
@@ -203,10 +199,14 @@ def train(config_file_path='run_config.yaml'):
     
     # Train & Evaluation
     best_f1 = 0
+    best_prec = 0
+    pest_rec = 0
+    best_metric = ''
+    best_epoch = 0
     for epoch in range(1, num_epochs+1):
         print(f"\n==== Epoch {epoch} ====")
         train_loss = train_loop(model, train_loader, optimizer, device, tqdm_disable)
-        val_loss, val_prec, val_rec, val_f1, val_metric = evaluate(model, valid_loader, device, label_2_id, tqdm_disable)
+        val_loss, val_prec, val_rec, val_f1, val_metric = evaluate(conn, experiment_name, model, epoch, valid_loader, device, label_2_id, id_2_label, tqdm_disable)
 
         print(f"[Train] Loss: {train_loss:.4f}")
         print(f"[Valid] Loss: {val_loss:.4f} | Precision: {val_prec:.4f} | Recall: {val_rec:.4f} | F1: {val_f1:.4f} | Metric: {val_metric}")
@@ -214,9 +214,37 @@ def train(config_file_path='run_config.yaml'):
         # Save best model
         if val_f1 > best_f1:
             best_f1 = val_f1
+            best_prec = val_prec
+            best_rec = val_rec
+            best_metric = val_metric
+            best_epoch = epoch
             os.makedirs("Checkpoints", exist_ok=True)
             model_path = os.path.join("Checkpoints", f"{train_name}_best_model.pt")
             torch.save(model.state_dict(), model_path)
             print(f"✅ Best model saved! @[{model_path}]")
-            evaluate(model, valid_loader, device, label_2_id, tqdm_disable, is_best_model=True, tokenizer=tokenizer, train_name=train_name)
-            print(f"✅ Unmatched samples info saved!")
+
+    # 모델학습 종료시간
+    end_time = datetime.now()
+
+    # 모델학습 소요시간
+    duration = end_time - start_time
+
+    # model_train_performance 테이블에 들어가는 scheme
+    model_train_performance_log = [(
+        experiment_name,
+        start_time,
+        end_time,
+        model_path,
+        best_epoch,
+        best_prec,
+        best_rec,
+        best_f1,
+        best_metric
+    )]
+
+    # DB(model_train_performance)에 정보 추가하기
+    insert_many_rows(conn, "model_train_performance", model_train_performance_log)
+
+    conn.close()
+
+    return duration

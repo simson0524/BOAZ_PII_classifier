@@ -5,6 +5,8 @@ from PIIClassifier.train_dataset import SpanClassificationTrainDataset, load_all
 from PIIClassifier.model import SpanPIIClassifier
 from DataPreprocessLogics.regex_based_doc_parsing.pii_detector.main import run_regex_detection
 from DataPreprocessLogics.ner_based_doc_parsing.ner_main import run_ner_detection
+from DataPreprocessLogics.DBMS.create_dbs import *
+from DataPreprocessLogics.DBMS.edit_dbs import *
 from sklearn.metrics import precision_score, recall_score, f1_score
 from transformers import AutoModel, AutoTokenizer, AutoConfig
 from torch.utils.data import DataLoader
@@ -31,7 +33,11 @@ import yaml
     미탐 : 추출된 Span의 Inference 결과가 "일반"인데, 정답지에 "일반"이 아닌 상태로 존재하는 경우
 """
 
-def test_1(dataloader, conn, label_2_id, id_2_label, is_pii=True):
+def test_1(experiment_name, dataloader, conn, label_2_id, id_2_label, is_pii=True):
+    # 검증1단계 시작시간
+    start_time = datetime.now()
+
+    # 정탐, 오탐, 미탐 로그를 담을 리스트
     hit, wrong, mismatch = [], [], []
 
     # column_name = [정탐, 오탐, 미탐]
@@ -56,36 +62,65 @@ def test_1(dataloader, conn, label_2_id, id_2_label, is_pii=True):
         for batch in tqdm(dataloader, desc=f"[검증1] {label}사전 검증중..."):
             batch_size = len( batch['sentence'] )
             for i in range( batch_size ):
+                curr_sentence_id = batch['sentence_id'][i]
                 curr_sentence = batch['sentence'][i]
                 curr_span_text = batch['span_text'][i]
-                curr_gt_label_id = batch['label'][i].item()
                 curr_dataset_idx = batch['idx'][i].item()
-                curr_is_validated = batch['is_validated'][i]
+                curr_gt_label_id = batch['label'][i].item()
+                curr_pred_label_id = label_2_id[label]
                 curr_file_name = batch['file_name'][i]
-                curr_sent_seq = batch['sequence'][i]
+                curr_sent_seq = batch['sentence_seq'][i]
+
+                # validation_1_sent_dataset_log 테이블에 들어가는 scheme
+                curr_data_log = (
+                    experiment_name,
+                    curr_sentence_id,
+                    curr_sentence,
+                    curr_span_text,
+                    curr_dataset_idx,
+                    curr_gt_label_id,
+                    curr_pred_label_id,
+                    curr_file_name,
+                    curr_sent_seq
+                )
 
                 # 정탐인 경우
-                if label_2_id[label] == curr_gt_label_id and (curr_span_text in table_set):
-                    hit.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
-                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
+                if (curr_pred_label_id == curr_gt_label_id) and (curr_span_text in table_set):
+                    hit.append( curr_data_log )
+                    metric[curr_pred_label_id][ 0 ] += 1
                     continue
+                
+                # 오탐인 경우
+                if (curr_span_text in table_set) and (curr_pred_label_id != curr_gt_label_id):
+                    wrong.append( curr_data_log )
+                    metric[curr_pred_label_id][ 1 ] += 1
+                    continue 
 
                 # 미탐인 경우
-                if (curr_span_text not in table_set) and (label_2_id[label] == curr_gt_label_id):
-                    mismatch.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
-                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
+                if (curr_span_text not in table_set) and (curr_pred_label_id == curr_gt_label_id):
+                    mismatch.append( curr_data_log )
+                    metric[curr_pred_label_id][ 2 ] += 1
                     continue
 
-                # 오탐인 경우
-                if (curr_span_text in table_set) and (label_2_id[label] != curr_gt_label_id):
-                    wrong.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
-                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
-                    continue             
-    
-    return metric, hit, wrong, mismatch
+    # DB(validation_1_sent_dataset_log)에 정보 추가하기
+    insert_many_rows(conn, "validation_1_sent_dataset_log", hit)
+    insert_many_rows(conn, "validation_1_sent_dataset_log", wrong)
+    insert_many_rows(conn, "validation_1_sent_dataset_log", mismatch)
+
+    # 검증1단계 종료시간
+    end_time = datetime.now()
+
+    # 검증1단계 소요시간
+    duration = end_time - start_time
+
+    return metric, hit, wrong, mismatch, start_time, end_time, duration
 
 
-def test_2(dataloader, conn, label_2_id, id_2_label, is_pii=True):
+def test_2(experiment_name, dataloader, conn, label_2_id, id_2_label, is_pii=True):
+    # 검증2단계 시작시간
+    start_time = datetime.now()
+
+    # 정탐, 오탐, 미탐 로그를 담을 리스트
     hit, wrong, mismatch = [], [], []
 
     # column_name = [정탐, 오탐, 미탐]
@@ -104,25 +139,42 @@ def test_2(dataloader, conn, label_2_id, id_2_label, is_pii=True):
         for batch in tqdm(dataloader, desc=f"[검증2] 검증중..."):
             batch_size = len( batch['sentence'] )
             for i in range( batch_size ):
+                curr_is_validated = batch['is_validated'][i]
+                curr_sentence_id = batch['sentence_id'][i]
                 curr_sentence = batch['sentence'][i]
                 curr_span_text = batch['span_text'][i]
-                curr_gt_label_id = batch['label'][i].item()
                 curr_dataset_idx = batch['idx'][i].item()
-                curr_is_validated = batch['is_validated'][i]
+                curr_gt_label_id = batch['label'][i].item()
+                curr_pred_label_id = label_2_id[label]
                 curr_file_name = batch['file_name'][i]
-                curr_sent_seq = batch['sequence'][i]
+                curr_sent_seq = batch['sentence_seq'][i]
+
+                # validation_2_sent_dataset_log 테이블에 들어가는 scheme
+                curr_data_log = (
+                    experiment_name,
+                    curr_sentence_id,
+                    curr_sentence,
+                    curr_span_text,
+                    curr_dataset_idx,
+                    curr_gt_label_id,
+                    curr_pred_label_id,
+                    curr_file_name,
+                    curr_sent_seq
+                )
 
                 # 앞 단계에서 이미 검증된 경우 건너뜀
+                # print(type(curr_is_validated), curr_is_validated) # 로그용 : 지금 is_validated가 반영이 되는지 안되는지를 모르겠음
                 if curr_is_validated:
                     continue
                 
                 # 정탐인 경우 - REGEX 추출
                 regex_texts = run_regex_detection(curr_sentence)
                 regex_spans = {regex_dict['단어'] for regex_dict in regex_texts}
-                
+
                 # REGEX 매칭되는 것이 있다면
                 if (curr_span_text in regex_spans) and (label_2_id[label] == curr_gt_label_id):
-                    hit.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
+                    hit.append( curr_data_log )
+                    metric[ curr_pred_label_id ][ 0 ] += 1
                     continue
 
                 # 정탐인 경우 - NER 추출
@@ -130,33 +182,48 @@ def test_2(dataloader, conn, label_2_id, id_2_label, is_pii=True):
                 ner_spans = {ner_dict['단어'] for ner_dict in ner_texts}
 
                 # NER 매칭되는 것이 있다면
-                if (curr_span_text in ner_spans) and (label_2_id[label] == curr_gt_label_id):
-                    hit.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
-                    continue
-                
-                # 미탐인 경우
-                if (label_2_id[label] == curr_gt_label_id) and (curr_span_text not in regex_spans) and (curr_span_text not in ner_spans):
-                    mismatch.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
-                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
+                if (curr_span_text in ner_spans) and (curr_pred_label_id == curr_gt_label_id):
+                    hit.append( curr_data_log )  
+                    metric[ curr_pred_label_id ][ 0 ] += 1
                     continue
 
                 # 오탐인 경우
-                if ((curr_span_text in regex_spans) or (curr_span_text in ner_spans)) and (label_2_id[label] != curr_gt_label_id):
-                    wrong.append((curr_span_text, curr_dataset_idx, curr_sentence, id_2_label[curr_gt_labe_id], label, curr_file_name, curr_sent_seq))
-                    metric[label_2_id[label]][ curr_gt_label_id ] += 1
-                    continue               
+                if ((curr_span_text in regex_spans) or (curr_span_text in ner_spans)) and (curr_pred_label_id != curr_gt_label_id):
+                    wrong.append( curr_data_log )
+                    metric[ curr_pred_label_id ][ 1 ] += 1
+                    continue 
+
+                # 미탐인 경우
+                if (curr_pred_label_id == curr_gt_label_id) and (curr_span_text not in regex_spans) and (curr_span_text not in ner_spans):
+                    mismatch.append( curr_data_log )
+                    metric[ curr_pred_label_id ][ 2 ] += 1
+                    continue             
     
-    return metric, hit, wrong, mismatch
+    # DB(validation_2_sent_dataset_log)에 정보 추가하기
+    insert_many_rows(conn, "validation_2_sent_dataset_log", hit)
+    insert_many_rows(conn, "validation_2_sent_dataset_log", wrong)
+    insert_many_rows(conn, "validation_2_sent_dataset_log", mismatch)
+    
+    # 검증2단계 종료시간
+    end_time = datetime.now()
+
+    # 검증2단계 소요시간
+    duration = end_time - start_time
+
+    return metric, hit, wrong, mismatch, start_time, end_time, duration
 
 
-def test_3(model, device, dataloader, conn, label_2_id, id_2_label):
+def test_3(experiment_name, model, device, dataloader, conn, label_2_id, id_2_label):
+    # 검증3단계 시작시간
+    start_time = datetime.now()
+
     model.eval()
 
     # 배치 별 샘플수가 다를 수 있으므로 sum후 마지막에 나눔
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
 
-    # column_name = pred
-    # row_name = GT
+    # column_name = GT
+    # row_name = Pred
     metric = [ [0 for _ in range(len(label_2_id))] for _ in range(len(label_2_id)) ]
 
     hit, wrong, mismatch = [], [], []
@@ -195,17 +262,37 @@ def test_3(model, device, dataloader, conn, label_2_id, id_2_label):
 
             # is_validated==False 인 친구들만 처리
             for i, vp3_idx in enumerate(vp3):
-                gt = int( vp3_labels[i].item() )
-                pred = int( vp3_preds[i].item() )
-                metric[pred][gt] += 1
+                curr_sentence_id = batch['sentence_id'][vp3_idx]
+                curr_sentence = batch['sentence'][vp3_idx]
+                curr_span_text = batch['span_text'][vp3_idx]
+                curr_dataset_idx = batch['idx'][vp3_idx]
+                curr_gt_label_id = int( vp3_labels[i].item() )
+                curr_pred_label_id = int( vp3_preds[i].item() )
+                curr_file_name = batch['file_name'][vp3_idx]
+                curr_sent_seq = batch['sentence_seq'][vp3_idx]
+                
+                # validation_3_sent_dataset_log 테이블에 들어가는 scheme
+                curr_data_log = (
+                    experiment_name,
+                    curr_sentence_id,
+                    curr_sentence,
+                    curr_span_text,
+                    curr_dataset_idx,
+                    curr_gt_label_id,
+                    curr_pred_label_id,
+                    curr_file_name,
+                    curr_sent_seq
+                )
 
-                # 검증 마지막 단계이므로 정탐/오탐/미탐 별 (SPAN_TEXT, GT_LABEL, PRED_LABEL)을 hit, wrong, mismatch에 append
-                if gt == pred:
-                    hit.append( (batch['span_text'][vp3_idx], None, batch['sentence'][vp3_idx], id_2_label[gt], id_2_label[pred], batch['file_name'][vp3_idx], batch['sequence'][vp3_idx]) )
-                if pred != 0 and pred != gt:
-                    wrong.append( (batch['span_text'][vp3_idx], None, batch['sentence'][vp3_idx], id_2_label[gt], id_2_label[pred], batch['file_name'][vp3_idx], batch['sequence'][vp3_idx]) )
-                if pred == 0 and pred != gt:
-                    mismatch.append( (batch['span_text'][vp3_idx], None, batch['sentence'][vp3_idx], id_2_label[gt], id_2_label[pred], batch['file_name'][vp3_idx], batch['sequence'][vp3_idx]) )
+                metric[curr_pred_label_id][curr_gt_label_id] += 1
+
+                # 검증 마지막 단계이므로 정탐/오탐/미탐 별 curr_data_log를 hit, wrong, mismatch에 append
+                if curr_gt_label_id == curr_pred_label_id:
+                    hit.append( curr_data_log )
+                if curr_pred_label_id != 0 and curr_pred_label_id != curr_gt_label_id:
+                    wrong.append( curr_data_log )
+                if curr_pred_label_id == 0 and curr_pred_label_id != curr_gt_label_id:
+                    mismatch.append( curr_data_log )
 
             # Loss
             loss = loss_fn(vp3_logits, vp3_labels)
@@ -222,25 +309,30 @@ def test_3(model, device, dataloader, conn, label_2_id, id_2_label):
     recall = recall_score(targets, preds, average="macro", zero_division=0)
     f1 = f1_score(targets, preds, average="macro", zero_division=0)
 
-    # 여기서 hit의 요소들은 사전등재후보리스트
-    return avg_loss, precision, recall, f1, metric, hit, wrong, mismatch       
+    # DB(validation_3_sent_dataset_log)에 정보 추가하기
+    insert_many_rows(conn, "validation_3_sent_dataset_log", hit)
+    insert_many_rows(conn, "validation_3_sent_dataset_log", wrong)
+    insert_many_rows(conn, "validation_3_sent_dataset_log", mismatch)
+
+    # 검증3단계 종료시간
+    end_time = datetime.now()
+
+    # 검증3단계 소요시간
+    duration = end_time - start_time
+
+    return avg_loss, precision, recall, f1, metric, hit, wrong, mismatch, start_time, end_time, duration       
 
 
-def test(config_file_path='run_config.yaml'):
+def test(experiment_name, previous_experiment_name, config):
     # DB connection
     conn = get_connection()
 
-    # Load config from "test_config.yaml"
-    with open(config_file_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-
-    # PRE SETTING
+    # SETTING
     model_name = config['model']['model_name']
     model = AutoModel.from_pretrained( model_name )
     tokenizer = AutoTokenizer.from_pretrained( model_name, use_fast=True )
 
     # Test Config
-    test_name = config['exp']['name']
     batch_size = config['exp']['batch_size']
     is_pii = config['exp']['is_pii']
     device = torch.device( config['exp']['device'] )
@@ -273,7 +365,7 @@ def test(config_file_path='run_config.yaml'):
     all_json_test_data = load_all_json( test_dataset_dir )
     all_json_test_data['data'] = random.sample( all_json_test_data['data'], int(len(all_json_test_data['data'])*0.2))
     test_dataset = SpanClassificationTrainDataset(
-        train_name=test_name,
+        train_name=experiment_name,
         json_data=all_json_test_data,
         tokenizer=tokenizer,
         label_2_id=label_2_id,
@@ -283,11 +375,13 @@ def test(config_file_path='run_config.yaml'):
         max_length=max_length
     )
 
+    # ------------------------------------------------------------------------ #
     # Dataloader(검증1)
     test_dataloader_1 = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     # 검증1
-    metric_1, hit_1, wrong_1, mismatch_1 = test_1(
+    metric_1, hit_1, wrong_1, mismatch_1, validation_1_start_time, validation_1_end_time, validation_1_duration = test_1(
+        experiment_name=experiment_name,
         dataloader=test_dataloader_1,
         conn=conn,
         label_2_id=label_2_id,
@@ -295,20 +389,72 @@ def test(config_file_path='run_config.yaml'):
         is_pii=is_pii
     )
 
+    # 이전실험에서의 검증1 로그 & 사전크기조회
+    prev_validation_1_performance_log = select_specific_row(
+        conn=conn,
+        table_name='validation_1_performance',
+        select_column_name='experiment_name',
+        select_value=previous_experiment_name
+    )
+    if is_pii:
+        dictionary_size_1 = len( load_word_set(conn, '개인정보') )
+    else:
+        dictionary_size_1 = len( load_word_set(conn, '기밀정보') )
+
+    epsilon = 0.00001
+
+    if prev_validation_1_performance_log:
+        prev_hit_counts      = prev_validation_1_performance_log[0][3]
+        prev_wrong_counts    = prev_validation_1_performance_log[0][5]
+        prev_mismatch_counts = prev_validation_1_performance_log[0][7]
+        prev_dictionary_size = prev_validation_1_performance_log[0][9]
+        hit_delta_rate             = len(hit_1) / (prev_hit_counts+epsilon)
+        wrong_delta_rate           = len(wrong_1) / (prev_wrong_counts+epsilon)
+        mismatch_delta_rate        = len(mismatch_1) / (prev_mismatch_counts+epsilon)
+        dictionary_size_delta_rate = dictionary_size_1 / (prev_dictionary_size+epsilon)
+    else:
+        hit_delta_rate             = None
+        wrong_delta_rate           = None
+        mismatch_delta_rate        = None
+        dictionary_size_delta_rate = None
+
+    # validation_1_performance 테이블에 들어가는 scheme
+    validation_1_performance_log = [(
+        experiment_name,
+        validation_1_start_time,
+        validation_1_end_time,
+        len(hit_1),
+        hit_delta_rate,
+        len(wrong_1),
+        wrong_delta_rate,
+        len(mismatch_1),
+        mismatch_delta_rate,
+        dictionary_size_1,
+        dictionary_size_delta_rate,
+        metric_1
+    )]
+
+    # DB(validation_1_performance)에 정보 추가하기
+    insert_many_rows(conn, "validation_1_performance", validation_1_performance_log)
+    
     # 검증1의 정탐 항목들의 is_validated를 True로 만듦
-    for _, idx in hit_1:
-        test_dataset.edit_validation_priority(
+    for _, _, _, _, idx, _, _, _, _ in hit_1:
+        test_dataset.edit_is_validated(
             idx=idx,
             edit_to=True
         )
 
-    print(f"\n[Metric_1]\n{metric_1}\n\n")
-    
+    print(f"\n[Metric_1]\n{metric_1}\nRow : label | Column : 정탐/오탐/미탐 순서\n\n")
+    # ------------------------------------------------------------------------ #
+
+
+    # ------------------------------------------------------------------------ #
     # Dataloader(검증2)
     test_dataloader_2 = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     # 검증2
-    metric_2, hit_2, wrong_2, mismatch_2 = test_2(
+    metric_2, hit_2, wrong_2, mismatch_2, validation_2_start_time, validation_2_end_time, validation_2_duration = test_2(
+        experiment_name=experiment_name,
         dataloader=test_dataloader_2,
         conn=conn,
         label_2_id=label_2_id,
@@ -316,20 +462,63 @@ def test(config_file_path='run_config.yaml'):
         is_pii=is_pii
     )
 
+    # 이전실험에서의 검증2 로그 조회
+    prev_validation_2_performance_log = select_specific_row(
+        conn=conn,
+        table_name='validation_2_performance',
+        select_column_name='experiment_name',
+        select_value=previous_experiment_name
+    )
+
+    epsilon = 0.00001
+
+    if prev_validation_2_performance_log:
+        prev_hit_counts      = prev_validation_2_performance_log[0][3]
+        prev_wrong_counts    = prev_validation_2_performance_log[0][5]
+        prev_mismatch_counts = prev_validation_2_performance_log[0][7]
+        hit_delta_rate             = len(hit_2) / (prev_hit_counts+epsilon)
+        wrong_delta_rate           = len(wrong_2) / (prev_wrong_counts+epsilon)
+        mismatch_delta_rate        = len(mismatch_2) / (prev_mismatch_counts+epsilon)
+    else:
+        hit_delta_rate             = None
+        wrong_delta_rate           = None
+        mismatch_delta_rate        = None
+
+    # validation_2_performance 테이블에 들어가는 scheme
+    validation_2_performance_log = [(
+        experiment_name,
+        validation_2_start_time,
+        validation_2_end_time,
+        len(hit_2),
+        hit_delta_rate,
+        len(wrong_2),
+        wrong_delta_rate,
+        len(mismatch_2),
+        mismatch_delta_rate,
+        metric_2
+    )]
+
+    # DB(validation_2_performance)에 정보 추가하기
+    insert_many_rows(conn, "validation_2_performance", validation_2_performance_log)
+
     # 검증2의 정탐 항목들의 is_validated를 True로 만듦
-    for _, idx in hit_2:
-        test_dataset.edit_validation_priority(
+    for _, _, _, _, idx, _, _, _, _ in hit_2:
+        test_dataset.edit_is_validated(
             idx=idx,
             edit_to=True
         )
 
-    print(f"\n[Metric_2]\n{metric_2}\n\n")
+    print(f"\n[Metric_2]\n{metric_2}\nRow : label | Column : 정탐/오탐/미탐 순서\n\n")
+    # ------------------------------------------------------------------------ #
 
+
+    # ------------------------------------------------------------------------ #
     # Dataloader(검증3)
     test_dataloader_3 = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
     # 검증3
-    avg_loss, precision, recall, f1, metric_3, hit_3, wrong_3, mismatch_3 = test_3(
+    avg_loss_3, precision_3, recall_3, f1_3, metric_3, hit_3, wrong_3, mismatch_3, validation_3_start_time, validation_3_end_time, validation_3_duration = test_3(
+        experiment_name=experiment_name,
         model=classifier,
         device=device, 
         dataloader=test_dataloader_3, 
@@ -338,88 +527,29 @@ def test(config_file_path='run_config.yaml'):
         id_2_label=id_2_label
         )
 
-    print(f"\n[Metric_3]\n{metric_3}\n\n")
+    # validation_3_performance 테이블에 들어가는 scheme
+    validation_3_performance_log = [(
+        experiment_name,
+        validation_3_start_time,
+        validation_3_end_time,
+        state_path,
+        precision_3,
+        recall_3,
+        f1_3,
+        metric_3
+    )]
 
+    # DB(validation_3_performance)에 정보 추가하기
+    insert_many_rows(conn, "validation_3_performance", validation_3_performance_log)
+
+    print(f"\n[Metric_3]\n{metric_3}\nRow : prediction label | Column : GT label\n\n")
+    # ------------------------------------------------------------------------ #
+
+
+    # ------------------------------------------------------------------------ #
     # TODO : hit_2, hit_3을 사전등재리스트에 올리고 일정 기준에 의해 사전에 추가
-    # 사용할 NER 클래스명들 -> 무엇? 완철's DataPreprocessLogics/ner_based_doc_parsing/ner_main.py run_ner_detection()
-    # 사용할 정규표현식들 -> 무엇? 혜주's DataPreprocessLogics/regex_based_doc_parsing/pii_detector/main.py run_regex_detector()
-
-    # DB에 데이터 저장 할 테이블이 없는 경우를 대비하여 생성해주기
-    # "모델_개인", "모델_기밀", "검증1_개인", "검증2_개인", "검증3_개인", "검증1_기밀", "검증2_기밀", "검증3_기밀"
-    create_metric_tables(conn)
-    timestamp = datetime.now()
-
-    if is_pii:
-        # 검증1(개인) 추가
-        metric_1_row = [(test_name, timestamp, metric_1[0][0], metric_1[0][1], metric_1[0][2], metric_1[1][0], metric_1[1][1], metric_1[1][2], metric_1[2][0], metric_1[2][1], metric_1[2][2])]
-        add_metric_rows(
-            conn=conn,
-            table_name="검증1_개인",
-            rows=metric_1_row
-        )
-        
-        # 검증2(개인) 추가
-        metric_2_row = [(test_name, timestamp, metric_2[0][0], metric_2[0][1], metric_2[0][2], metric_2[1][0], metric_2[1][1], metric_2[1][2], metric_2[2][0], metric_2[2][1], metric_2[2][2])]
-        add_metric_rows(
-            conn=conn,
-            table_name="검증2_개인",
-            rows=metric_2_row
-        )
-        
-        # 검증3(개인) 추가
-        metric_3_row = [(test_name, timestamp, metric_3[0][0], metric_3[0][1], metric_3[0][2], metric_3[1][0], metric_3[1][1], metric_3[1][2], metric_3[2][0], metric_3[2][1], metric_3[2][2])]
-        add_metric_rows(
-            conn=conn,
-            table_name="검증3_개인",
-            rows=metric_3_row
-        )
-    else:
-        # 검증1(기밀) 추가
-        metric_1_row = [(test_name, timestamp, metric_1[0][0], metric_1[0][1], metric_1[0][2], metric_1[1][0], metric_1[1][1], metric_1[1][2], None, None, None)]
-        add_metric_rows(
-            conn=conn,
-            table_name="검증1_기밀",
-            rows=metric_1_row
-        )
-        
-        # 검증2(기밀) 추가
-        metric_2_row = [(test_name, timestamp, metric_2[0][0], metric_2[0][1], metric_2[0][2], metric_2[1][0], metric_2[1][1], metric_2[1][2], None, None, None)]
-        add_metric_rows(
-            conn=conn,
-            table_name="검증2_기밀",
-            rows=metric_2_row
-        )
-        
-        # 검증3(기밀) 추가
-        metric_3_row = [(test_name, timestamp, metric_3[0][0], metric_3[0][1], metric_3[0][2], metric_3[1][0], metric_3[1][1], metric_3[1][2], None, None, None)]
-        add_metric_rows(
-            conn=conn,
-            table_name="검증3_기밀",
-            rows=metric_3_row
-        )
-
-    # DB에 test 결과들을 저장할 테이블이 없는 경우를 대비해 생성하고 이전에 사용한 경우를 대비해 초기화해주기
-    # "prediction"
-    create_prediction_tables(conn)
-    truncate_tables(conn, "prediction")
-
-    # 검증3 오탐사항 "prediction"테이블에 추가
-    for span_text, gt, pred in wrong_3:
-        curr_row = [(test_name, timestamp, span_text, None, gt, pred)]
-        add_prediction_rows(
-            conn=conn,
-            table_name='prediction',
-            rows=curr_row
-            )
-    
-    # 검증3 미탐사항 "prediction"테이블에 추가
-    for span_text, gt, pred in mismatch_3:
-        curr_row = [(test_name, timestamp, span_text, None, gt, pred)]
-        add_prediction_rows(
-            conn=conn,
-            table_name='prediction',
-            rows=curr_row
-            )
-
+    # ------------------------------------------------------------------------ #
 
     conn.close()
+
+    return validation_1_duration, validation_2_duration, validation_3_duration
